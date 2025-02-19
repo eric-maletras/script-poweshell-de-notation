@@ -1,0 +1,94 @@
+# Demande des informations à l'utilisateur
+$domaine = Read-Host "Entrez le nom du domaine"
+$nomServeurWeb = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
+$ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
+$nomSiteWeb = Read-Host "Entrez le nom du site web (ex: glpi)"
+
+# Initialisation du fichier de log
+$logFile = "C:\check_dns_log.txt"
+New-Item -ItemType File -Path $logFile -Force | Out-Null
+
+# Fonction pour écrire dans le log
+function Write-Log {
+    param (
+        [string]$Message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp - $Message" | Out-File -Append -FilePath $logFile
+}
+
+# Vérification des points demandés
+$note = 0
+$totalPoints = 8
+
+Write-Log "Début des vérifications pour le domaine: $domaine"
+
+# 1. Vérifier si le rôle DNS est installé
+$dnsInstalled = Get-WindowsFeature -Name "DNS" | Select-Object -ExpandProperty Installed
+if ($dnsInstalled) {
+    Write-Log "[OK] Le rôle DNS est installé."
+    $note++
+} else {
+    Write-Log "[ERREUR] Le rôle DNS n'est pas installé."
+}
+
+# 2. Vérifier si une ZRD principale au nom du domaine existe
+$zrdExist = Get-DnsServerZone | Where-Object { $_.ZoneName -eq $domaine -and $_.ZoneType -eq "Primary" }
+if ($zrdExist) {
+    Write-Log "[OK] La zone de recherche directe (ZRD) '$domaine' est créée en principale."
+    $note++
+} else {
+    Write-Log "[ERREUR] La zone de recherche directe (ZRD) '$domaine' est absente."
+}
+
+# 3. Vérifier si une ZRI est créée
+$zriExist = Get-DnsServerZone | Where-Object { $_.IsReverseLookupZone -eq $true }
+if ($zriExist) {
+    Write-Log "[OK] Une zone de recherche inverse (ZRI) est créée."
+    $note++
+} else {
+    Write-Log "[ERREUR] Aucune zone de recherche inverse (ZRI) n'est configurée."
+}
+
+# 4. Vérifier si le DNS de la carte réseau est bien configuré
+$dnsConfig = Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses
+if ($dnsConfig -contains "127.0.0.1" -or $dnsConfig -contains (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match "Ethernet" }).IPAddress) {
+    Write-Log "[OK] Le serveur DNS est bien configuré sur 127.0.0.1 ou l'IP du serveur."
+    $note++
+} else {
+    Write-Log "[ERREUR] Le serveur DNS n'est pas configuré correctement."
+}
+
+# 5. Vérifier la présence d'un enregistrement A pour le serveur web
+$recordA = Get-DnsServerResourceRecord -ZoneName $domaine | Where-Object { $_.HostName -eq $nomServeurWeb -and $_.RecordClass -eq "IN" -and $_.RecordType -eq 1 }
+if ($recordA) {
+    Write-Log "[OK] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est présent."
+    $note++
+} else {
+    Write-Log "[ERREUR] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est absent."
+}
+
+# 6. Vérifier la présence d'un enregistrement CNAME pour le site web
+$recordCNAME = Get-DnsServerResourceRecord -ZoneName $domaine | Where-Object { $_.HostName -eq $nomSiteWeb -and $_.RecordType -eq 5 }
+if ($recordCNAME) {
+    Write-Log "[OK] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est présent."
+    $note++
+} else {
+    Write-Log "[ERREUR] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est absent."
+}
+
+# 7. Vérifier la présence d'un redirecteur (8.8.8.8)
+$redirectors = Get-DnsServerForwarder
+if ($redirectors.ServerAddresses -contains "8.8.8.8") {
+    Write-Log "[OK] Le redirecteur vers 8.8.8.8 est configuré."
+    $note++
+} else {
+    Write-Log "[ERREUR] Le redirecteur vers 8.8.8.8 est absent."
+}
+
+# Calcul de la note
+$finalNote = [math]::Round(($note / $totalPoints) * 20, 1)
+Write-Log "Vérifications terminées. Note obtenue: $finalNote / 20"
+
+Write-Host "Le rapport de vérification a été généré: $logFile"
+Write-Host "Note finale: $finalNote / 20"
