@@ -9,8 +9,6 @@ $nomSiteWeb = Read-Host "Entrez le nom du site web (ex: glpi)"
 # Initialisation du fichier de log
 $logFile = "C:\$($nom)-$($prenom).txt"
 
-
-
 # Fonction pour écrire dans le log
 function Write-Log {
     param (
@@ -22,7 +20,7 @@ function Write-Log {
 
 # Vérification des points demandés
 $note = 0
-$totalPoints = 7
+$totalPoints = 9
 
 Write-Log "Début des vérifications pour le domaine: $domaine"
 
@@ -63,22 +61,27 @@ if ($dnsConfig -contains '127.0.0.1' -or $dnsConfig -contains $localIP) {
     Write-Log "[ERREUR] Le serveur DNS n'est pas configuré correctement."
 }
 
-# 5. Vérifier la présence exacte d'un enregistrement A pour le serveur web
-$recordA = Get-DnsServerResourceRecord -ZoneName $domaine -Name $nomServeurWeb -RRType 'A' -ErrorAction SilentlyContinue
-if ($recordA -and ($recordA.RecordData.IPv4Address.IPAddressToString -eq $ipServeurWeb)) {
-    Write-Log "[OK] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est présent."
-    $note++
-} else {
-    Write-Log "[ERREUR] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est absent ou incorrect."
-}
+# Vérifier uniquement si la ZRD existe avant d'interroger les records
+if ($zrdExist) {
+    # 5. Vérifier la présence exacte d'un enregistrement A pour le serveur web
+    $recordA = Get-DnsServerResourceRecord -ZoneName $domaine -Name $nomServeurWeb -RRType 'A' -ErrorAction SilentlyContinue
+    if ($recordA -and ($recordA.RecordData.IPv4Address.IPAddressToString -eq $ipServeurWeb)) {
+        Write-Log "[OK] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est présent."
+        $note++
+    } else {
+        Write-Log "[ERREUR] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est absent ou incorrect."
+    }
 
-# 6. Vérifier la présence exacte d'un enregistrement CNAME pour le site web
-$recordCNAME = Get-DnsServerResourceRecord -ZoneName $domaine -Name $nomSiteWeb -RRType 'CNAME' -ErrorAction SilentlyContinue
-if ($recordCNAME -and ($recordCNAME.RecordData.HostNameAlias -eq "$nomServeurWeb.$domaine.")) {
-    Write-Log "[OK] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est présent."
-    $note++
+    # 6. Vérifier la présence exacte d'un enregistrement CNAME pour le site web
+    $recordCNAME = Get-DnsServerResourceRecord -ZoneName $domaine -Name $nomSiteWeb -RRType 'CNAME' -ErrorAction SilentlyContinue
+    if ($recordCNAME -and ($recordCNAME.RecordData.HostNameAlias -eq "$nomServeurWeb.$domaine.")) {
+        Write-Log "[OK] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est présent."
+        $note++
+    } else {
+        Write-Log "[ERREUR] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est absent ou incorrect."
+    }
 } else {
-    Write-Log "[ERREUR] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est absent ou incorrect."
+    Write-Log "[ERREUR] Les vérifications des enregistrements DNS sont ignorées car la zone '$domaine' est absente."
 }
 
 # 7. Vérifier la présence d'un redirecteur (8.8.8.8)
@@ -90,6 +93,26 @@ if ($redirectors -contains '8.8.8.8') {
     Write-Log "[ERREUR] Le redirecteur vers 8.8.8.8 est absent."
 }
 
+# 8. Vérifier que l'IP est configurée en statique
+$ipConfig = Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Ethernet' }
+if ($ipConfig.Dhcp -eq "Disabled") {
+    Write-Log "[OK] L'IP du serveur est configurée en statique."
+    $note++
+} else {
+    Write-Log "[ERREUR] L'IP du serveur n'est pas configurée en statique."
+}
+
+
+# 9. Vérifier que le suffixe DNS principal correspond au domaine
+$suffixDNS = (Get-DnsClientGlobalSetting).SuffixSearchList | Select-Object -First 1
+if ($suffixDNS -eq $domaine) {
+    Write-Log "[OK] Le suffixe DNS principal correspond au domaine '$domaine'."
+    $note++
+} else {
+    Write-Log "[ERREUR] Le suffixe DNS principal '$suffixDNS' ne correspond pas au domaine '$domaine'."
+}
+
+
 # Calcul de la note
 $finalNote = [math]::Round(($note / $totalPoints) * 20, 1)
 Write-Log "Vérifications terminées. Note obtenue: $finalNote / 20"
@@ -97,11 +120,12 @@ Write-Log "Vérifications terminées. Note obtenue: $finalNote / 20"
 Write-Host "Le rapport de vérification a été généré: $logFile"
 Write-Host "Note finale: $finalNote / 20"
 
-
-# Envoi simple du fichier texte (sans JSON compliqué)
+# Envoi du log sur le site externe
 $logContent = Get-Content -Path $logFile -Raw
-
 Invoke-RestMethod -Uri "http://www.imcalternance.com/logsapi/logreceiver.php?filename=$nom-$prenom.txt" `
                   -Method Post `
                   -Body $logContent `
                   -ContentType "text/plain; charset=utf-8"
+
+# Attendre avant de fermer
+Read-Host -Prompt "Appuyez sur Entrée pour quitter"
