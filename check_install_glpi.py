@@ -5,6 +5,7 @@ import sys
 import subprocess
 import socket
 import re
+import json
 
 # Liste des bibliothèques requises sous Debian
 REQUIRED_APT_LIBS = ["python3-requests", "python3-bs4"]
@@ -15,9 +16,9 @@ def install_required_packages():
         try:
             subprocess.run(["dpkg", "-s", pkg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
-            print(f"[⚠] {pkg} n'est pas installé, installation en cours...")
+            log(f"[⚠] {pkg} n'est pas installé, installation en cours...")
             subprocess.check_call(["apt", "install", "-y", pkg])
-            print(f"[✔] {pkg} installé avec succès.")
+            log(f"[✔] {pkg} installé avec succès.")
 
 # Installer les paquets si besoin
 install_required_packages()
@@ -36,6 +37,14 @@ score = 0
 EXPECTED_HOSTNAME = "tux-01"
 EXPECTED_IP = "192.168.62.133"
 
+# Liste pour stocker les messages
+log_messages = []
+
+def log(message):
+    """Ajoute un message au log et l'affiche ensuite."""
+    log_messages.append(message)
+
+
 def check_hostname(expected_hostname=EXPECTED_HOSTNAME):
     """ Vérifie si le nom de la machine correspond au nom attendu """
     global score, total
@@ -43,12 +52,12 @@ def check_hostname(expected_hostname=EXPECTED_HOSTNAME):
     try:
         hostname = socket.gethostname()
         if hostname == expected_hostname:
-            print(f"[✔] Nom de la VM correct : {hostname}")
+            log(f"[✔] Nom de la VM correct : {hostname}")
             score += 1
         else:
-            print(f"[✖] Nom de la VM incorrect (Attendu: {expected_hostname}, Actuel: {hostname})")
+            log(f"[✖] Nom de la VM incorrect (Attendu: {expected_hostname}, Actuel: {hostname})")
     except Exception as e:
-        print(f"[✖] Erreur lors de la récupération du nom de la VM : {e}")
+        log(f"[✖] Erreur lors de la récupération du nom de la VM : {e}")
 
 def get_default_interface():
     """ Détecte l'interface réseau principale en listant celles ayant une adresse IP """
@@ -65,7 +74,7 @@ def get_default_interface():
         else:
             return None
     except Exception as e:
-        print(f"[✖] Erreur lors de la détection de l'interface réseau : {e}")
+        log(f"[✖] Erreur lors de la détection de l'interface réseau : {e}")
         return None
 
 
@@ -76,7 +85,7 @@ def check_static_ip(expected_ip=EXPECTED_IP):
 
     interface = get_default_interface()
     if not interface:
-        print("[✖] Impossible de détecter l'interface réseau principale.")
+        log("[✖] Impossible de détecter l'interface réseau principale.")
         return
 
     try:
@@ -94,15 +103,15 @@ def check_static_ip(expected_ip=EXPECTED_IP):
                     ip_found = ip_match.group(1)
 
         if is_static and ip_found == expected_ip:
-            print(f"[✔] L'IP est bien en statique et correspond à {expected_ip} sur {interface}")
+            log(f"[✔] L'IP est bien en statique et correspond à {expected_ip} sur {interface}")
             score += 1
         elif not is_static:
-            print(f"[✖] L'interface {interface} n'est pas configurée en statique")
+            log(f"[✖] L'interface {interface} n'est pas configurée en statique")
         elif ip_found != expected_ip:
-            print(f"[✖] L'IP configurée ({ip_found}) sur {interface} ne correspond pas à l'attendue ({expected_ip})")
+            log(f"[✖] L'IP configurée ({ip_found}) sur {interface} ne correspond pas à l'attendue ({expected_ip})")
 
     except Exception as e:
-        print(f"[✖] Erreur lors de la vérification de l'IP statique : {e}")
+        log(f"[✖] Erreur lors de la vérification de l'IP statique : {e}")
 
 
 def check_hosts(expected_ip=EXPECTED_IP, expected_hostname=EXPECTED_HOSTNAME):
@@ -121,19 +130,19 @@ def check_hosts(expected_ip=EXPECTED_IP, expected_hostname=EXPECTED_HOSTNAME):
         has_ip = any(line.startswith(expected_ip) and expected_hostname in line for line in hosts_content)
 
         if has_127:
-            print("[✔] 127.0.1.1 est bien associé au hostname")
+            log(f"[✔] 127.0.1.1 est bien associé au {expected_hostname}")
             score += 1
         else:
-            print(f"[✖] 127.0.1.1 n'est pas correctement associé à {expected_hostname} dans /etc/hosts")
+            log(f"[✖] 127.0.1.1 n'est pas correctement associé à {expected_hostname} dans /etc/hosts")
 
         if has_ip:
-            print(f"[✔] {expected_ip} est bien associé au hostname")
+            log(f"[✔] {expected_ip} est bien associé au hostname")
             score += 1
         else:
-            print(f"[✖] L'IP {expected_ip} n'est pas correctement associée à {expected_hostname} dans /etc/hosts")
+            log(f"[✖] L'IP {expected_ip} n'est pas correctement associée à {expected_hostname} dans /etc/hosts")
 
     except Exception as e:
-        print(f"[✖] Erreur lors de la lecture de /etc/hosts : {e}")
+        log(f"[✖] Erreur lors de la lecture de /etc/hosts : {e}")
 
 
 def check_dns():
@@ -145,13 +154,13 @@ def check_dns():
             resolv_content = f.read()
         
         if "nameserver" in resolv_content:
-            print("[✔] /etc/resolv.conf contient bien un serveur DNS")
+            log("[✔] /etc/resolv.conf contient bien un serveur DNS")
             score += 1
         else:
-            print("[✖] Pas de serveur DNS configuré dans /etc/resolv.conf")
+            log("[✖] Pas de serveur DNS configuré dans /etc/resolv.conf")
 
     except Exception as e:
-        print(f"[✖] Erreur lors de la vérification de /etc/resolv.conf : {e}")
+        log(f"[✖] Erreur lors de la vérification de /etc/resolv.conf : {e}")
 
 def check_packages():
     """ Vérifie que Apache, MariaDB et PHP sont installés """
@@ -163,10 +172,10 @@ def check_packages():
     for package in packages:
         result = subprocess.getoutput(f"dpkg -l | grep {package}")
         if package in result:
-            print(f"[✔] {package} est installé")
+            log(f"[✔] {package} est installé")
             score += 1
         else:
-            print(f"[✖] {package} n'est pas installé")
+            log(f"[✖] {package} n'est pas installé")
             missing.append(package)
 
 def check_phpmyadmin():
@@ -177,28 +186,28 @@ def check_phpmyadmin():
     # Vérifier si phpMyAdmin est installé
     result = subprocess.getoutput("dpkg -l | grep phpmyadmin")
     if "phpmyadmin" in result:
-        print("[✔] phpMyAdmin est installé")
+        log("[✔] phpMyAdmin est installé")
         score += 1
     else:
-        print("[✖] phpMyAdmin n'est pas installé")
+        log("[✖] phpMyAdmin n'est pas installé")
 
     # Vérifier la configuration Apache
     if os.path.exists("/etc/apache2/conf-available/phpmyadmin.conf"):
-        print("[✔] Configuration Apache pour phpMyAdmin trouvée")
+        log("[✔] Configuration Apache pour phpMyAdmin trouvée")
         score += 1
     else:
-        print("[✖] Pas de configuration Apache pour phpMyAdmin")
+        log("[✖] Pas de configuration Apache pour phpMyAdmin")
 
     # Vérifier si phpMyAdmin répond en HTTP
     try:
         response = requests.get("http://localhost/phpmyadmin", timeout=3)
         if response.status_code == 200:
-            print("[✔] phpMyAdmin est accessible via HTTP")
+            log("[✔] phpMyAdmin est accessible via HTTP")
             score += 1
         else:
-            print(f"[✖] phpMyAdmin ne répond pas correctement (Code HTTP {response.status_code})")
+            log(f"[✖] phpMyAdmin ne répond pas correctement (Code HTTP {response.status_code})")
     except requests.exceptions.RequestException:
-        print("[✖] Impossible d'accéder à phpMyAdmin")
+        log("[✖] Impossible d'accéder à phpMyAdmin")
 
 
 def check_glpi_db():
@@ -214,21 +223,21 @@ def check_glpi_db():
         # Vérifier si l'utilisateur glpi existe
         user_check = subprocess.getoutput(f"echo \"{check_user_cmd}\" | mariadb -u root -N 2>/dev/null")
         if "glpi" in user_check:
-            print("[✔] L'utilisateur 'glpi' existe dans MariaDB")
+            log("[✔] L'utilisateur 'glpi' existe dans MariaDB")
             score += 1
         else:
-            print("[✖] L'utilisateur 'glpi' n'existe pas dans MariaDB")
+            log("[✖] L'utilisateur 'glpi' n'existe pas dans MariaDB")
 
         # Vérifier si la base de données glpi existe
         db_check = subprocess.getoutput(f"echo \"{check_db_cmd}\" | mariadb -u root -N 2>/dev/null")
         if "glpi" in db_check:
-            print("[✔] La base de données 'glpi' existe dans MariaDB")
+            log("[✔] La base de données 'glpi' existe dans MariaDB")
             score += 1
         else:
-            print("[✖] La base de données 'glpi' n'existe pas dans MariaDB")
+            log("[✖] La base de données 'glpi' n'existe pas dans MariaDB")
 
     except Exception as e:
-        print(f"[✖] Erreur lors de la vérification de la base GLPI : {e}")
+        log(f"[✖] Erreur lors de la vérification de la base GLPI : {e}")
 
 
 def check_php_extensions():
@@ -239,18 +248,18 @@ def check_php_extensions():
     # Vérifier si php-intl est installé
     package_check = subprocess.getoutput("dpkg -l | grep php-intl")
     if "php-intl" in package_check:
-        print("[✔] Le paquet php-intl est installé")
+        log("[✔] Le paquet php-intl est installé")
         score += 1
     else:
-        print("[✖] Le paquet php-intl n'est pas installé")
+        log("[✖] Le paquet php-intl n'est pas installé")
 
     # Vérifier si l'extension intl est activée
     extension_check = subprocess.getoutput("php -m | grep intl")
     if "intl" in extension_check:
-        print("[✔] L'extension intl est activée dans PHP")
+        log("[✔] L'extension intl est activée dans PHP")
         score += 1
     else:
-        print("[✖] L'extension intl n'est pas activée dans PHP")
+        log("[✖] L'extension intl n'est pas activée dans PHP")
 
 
 def get_glpi_vhost():
@@ -265,7 +274,7 @@ def get_glpi_vhost():
         else:
             return None
     except Exception as e:
-        print(f"[✖] Impossible de lire le VirtualHost GLPI : {e}")
+        log(f"[✖] Impossible de lire le VirtualHost GLPI : {e}")
         return None
 
 def check_glpi():
@@ -275,10 +284,10 @@ def check_glpi():
 
     vhost = get_glpi_vhost()
     if not vhost:
-        print("[✖] Aucun ServerName trouvé pour GLPI, impossible de tester l'accès HTTP")
+        log("[✖] Aucun ServerName trouvé pour GLPI, impossible de tester l'accès HTTP")
         return
 
-    print(f"[ℹ] GLPI est configuré sur {vhost}, test de l'accès HTTP...")
+    log("[ℹ] GLPI est configuré sur {vhost}, test de l'accès HTTP...")
 
     try:
         response = requests.get(f"http://{vhost}", timeout=3)
@@ -287,17 +296,17 @@ def check_glpi():
             title = soup.title.string if soup.title else "Sans titre"
 
             if "install.php" in response.text.lower():
-                print("[✖] GLPI n'est pas totalement configuré (install.php détecté)")
+                log("[✖] GLPI n'est pas totalement configuré (install.php détecté)")
             elif "GLPI" in title:
-                print(f"[✔] GLPI est bien installé et accessible via {vhost}")
+                log(f"[✔] GLPI est bien installé et accessible via {vhost}")
                 score += 1
             else:
-                print(f"[✖] Page inattendue pour GLPI sur {vhost}")
+                log(f"[✖] Page inattendue pour GLPI sur {vhost}")
         else:
-            print(f"[✖] GLPI ne répond pas correctement sur {vhost} (Code HTTP {response.status_code})")
+            log(f"[✖] GLPI ne répond pas correctement sur {vhost} (Code HTTP {response.status_code})")
 
     except requests.exceptions.RequestException:
-        print(f"[✖] Impossible d'accéder à GLPI sur {vhost}")
+        log(f"[✖] Impossible d'accéder à GLPI sur {vhost}")
 
 
 
@@ -312,27 +321,12 @@ def check_services():
     for service in services:
         result = subprocess.getoutput(f"systemctl is-active {service}")
         if result.strip() == "active":
-            print(f"[✔] {service} est actif")
+            log(f"[✔] {service} est actif")
             score += 1
         else:
-            print(f"[✖] {service} est inactif")
+            log("f[✖] {service} est inactif")
             inactive.append(service)
 
-def display_final_score():
-    """ Affiche le score final sur 20 """
-    print("\n===== Résumé =====")
-
-    # Calcul de la note normalisée sur 20
-    score_sur_20 = round((score / total) * 20, 2) if total > 0 else 0
-
-    print(f"Score final : {score}/{total} ({score_sur_20}/20)")
-
-    if score_sur_20 == 20:
-        print("✅ Tout est parfaitement configuré !")
-    elif score_sur_20 >= 14:
-        print("⚠️ Quelques ajustements mineurs sont nécessaires.")
-    else:
-        print("❌ Problèmes détectés, intervention recommandée !")
 
 
 # Exécution des tests
@@ -347,5 +341,66 @@ check_glpi_db()
 check_php_extensions()
 check_glpi()
 check_services()
-display_final_score()
 
+
+# Calcul de la note normalisée sur 20
+score_sur_20 = round((score / total) * 20, 2) if total > 0 else 0
+
+# Ajouter la note finale au log
+log_messages.append("\n===== Résumé des tests =====")
+log_messages.append(f"Score final : {score}/{total} ({score_sur_20}/20)")
+
+if score_sur_20 == 20:
+    log_messages.append("✅ Tout est parfaitement configuré !")
+elif score_sur_20 >= 14:
+    log_messages.append("⚠️ Quelques ajustements mineurs sont nécessaires.")
+else:
+    log_messages.append("❌ Problèmes détectés, intervention recommandée !")
+
+# Afficher le log dans le terminal
+print("\n".join(log_messages))
+
+# Fonction pour envoyer les résultats
+import requests
+import json
+
+def envoyer_donnees(nom, prenom, commentaires, note):
+    """Envoie les résultats du test au serveur externe en JSON avec filename en paramètre d'URL."""
+    
+    # Définir le nom du fichier attendu par le serveur
+    filename = f"{nom}-{prenom}.txt"
+    
+    # Construire l'URL avec le paramètre filename
+    url = f"http://www.imcalternance.com/logsapi/logreceiver.php?filename={filename}"
+    
+    headers = {"Content-Type": "application/json"}
+    data = {
+        "nom": nom,
+        "prenom": prenom,
+        "commentaires": commentaires,
+        "note": note
+    }
+
+    # 🔍 Debug : Afficher le JSON avant envoi
+    print("\n📤 JSON envoyé :")
+#    print(json.dumps(data, indent=4, ensure_ascii=False))  
+
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            print(f"\n✅ Les résultats ont été envoyés avec succès sous {filename}.")
+        else:
+            print(f"\n❌ Échec de l'envoi. Statut HTTP : {response.status_code}")
+            print(f"🔍 Réponse du serveur : {response.text}")  # Debug de la réponse serveur
+    except Exception as e:
+        print(f"\n❌ Erreur lors de l'envoi : {e}")
+
+# Demander le nom et le prénom de l'utilisateur
+nom = input("\nEntrez votre nom : ")
+prenom = input("Entrez votre prénom : ")
+
+# Transformer les logs en texte avant envoi
+log_output = "\n".join(log_messages)
+
+# Envoyer les résultats
+envoyer_donnees(nom, prenom, log_output, score_sur_20)
