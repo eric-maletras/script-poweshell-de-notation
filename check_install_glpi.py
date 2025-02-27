@@ -156,8 +156,8 @@ def check_dns():
 def check_packages():
     """ Vérifie que Apache, MariaDB et PHP sont installés """
     global score, total
-    total += 1
     packages = ["apache2", "mariadb-server", "php"]
+    total += len(packages)
     missing = []
 
     for package in packages:
@@ -172,41 +172,34 @@ def check_packages():
 def check_phpmyadmin():
     """ Vérifie que phpMyAdmin est installé, configuré et accessible """
     global score, total
-    total += 1
+    total += 3
 
     # Vérifier si phpMyAdmin est installé
     result = subprocess.getoutput("dpkg -l | grep phpmyadmin")
     if "phpmyadmin" in result:
         print("[✔] phpMyAdmin est installé")
-        package_ok = True
+        score += 1
     else:
         print("[✖] phpMyAdmin n'est pas installé")
-        package_ok = False
 
     # Vérifier la configuration Apache
     if os.path.exists("/etc/apache2/conf-available/phpmyadmin.conf"):
         print("[✔] Configuration Apache pour phpMyAdmin trouvée")
-        config_ok = True
+        score += 1
     else:
         print("[✖] Pas de configuration Apache pour phpMyAdmin")
-        config_ok = False
 
     # Vérifier si phpMyAdmin répond en HTTP
     try:
         response = requests.get("http://localhost/phpmyadmin", timeout=3)
         if response.status_code == 200:
             print("[✔] phpMyAdmin est accessible via HTTP")
-            access_ok = True
+            score += 1
         else:
             print(f"[✖] phpMyAdmin ne répond pas correctement (Code HTTP {response.status_code})")
-            access_ok = False
     except requests.exceptions.RequestException:
         print("[✖] Impossible d'accéder à phpMyAdmin")
-        access_ok = False
 
-    # Valider le test si tout est bon
-    if package_ok and config_ok and access_ok:
-        score += 1
 
 def check_glpi_db():
     """ Vérifie que la base de données GLPI et son utilisateur existent dans MariaDB """
@@ -241,29 +234,23 @@ def check_glpi_db():
 def check_php_extensions():
     """ Vérifie que l'extension PHP intl est installée et activée """
     global score, total
-    total += 1  # 1 point si l'extension est installée et activée
+    total += 2  # 1 point si l'extension est installée et activée
 
     # Vérifier si php-intl est installé
     package_check = subprocess.getoutput("dpkg -l | grep php-intl")
     if "php-intl" in package_check:
         print("[✔] Le paquet php-intl est installé")
-        package_ok = True
+        score += 1
     else:
         print("[✖] Le paquet php-intl n'est pas installé")
-        package_ok = False
 
     # Vérifier si l'extension intl est activée
     extension_check = subprocess.getoutput("php -m | grep intl")
     if "intl" in extension_check:
         print("[✔] L'extension intl est activée dans PHP")
-        extension_ok = True
+        score += 1
     else:
         print("[✖] L'extension intl n'est pas activée dans PHP")
-        extension_ok = False
-
-    # Valider le test si tout est bon
-    if package_ok and extension_ok:
-        score += 1
 
 
 def get_glpi_vhost():
@@ -318,8 +305,8 @@ def check_glpi():
 def check_services():
     """ Vérifie que Apache et MariaDB sont bien actifs """
     global score, total
-    total += 1
     services = ["apache2", "mariadb"]
+    total += len(services)
     inactive = []
 
     for service in services:
