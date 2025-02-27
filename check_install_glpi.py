@@ -32,10 +32,14 @@ from bs4 import BeautifulSoup
 total = 0
 score = 0
 
+# Demander le nom et le prénom de l'utilisateur
+nom = input("\nEntrez votre nom : ")
+prenom = input("Entrez votre prénom : ")
 
 # Variables globales (prêtes pour un prompt plus tard)
-EXPECTED_HOSTNAME = "tux-01"
-EXPECTED_IP = "192.168.62.133"
+EXPECTED_HOSTNAME = input("\nEntrez le nom de la VM : ")
+EXPECTED_DOMAIN = input("\nEntrez le nom de domaine : ")
+EXPECTED_IP = input("\nEntrez l'IP (sans le CIDR) de la VM : ")
 
 # Liste pour stocker les messages
 log_messages = []
@@ -136,7 +140,7 @@ def check_hosts(expected_ip=EXPECTED_IP, expected_hostname=EXPECTED_HOSTNAME):
             log(f"[✖] 127.0.1.1 n'est pas correctement associé à {expected_hostname} dans /etc/hosts")
 
         if has_ip:
-            log(f"[✔] {expected_ip} est bien associé au hostname")
+            log(f"[✔] {expected_ip} est bien associé au {expected_hostname}")
             score += 1
         else:
             log(f"[✖] L'IP {expected_ip} n'est pas correctement associée à {expected_hostname} dans /etc/hosts")
@@ -177,6 +181,48 @@ def check_packages():
         else:
             log(f"[✖] {package} n'est pas installé")
             missing.append(package)
+
+
+def check_mariadb_security():
+    """ Vérifie si MariaDB a été sécurisé avec mysql_secure_installation """
+    global score, total
+    total += 3  # Ce test vaut maintenant 3 points (1 par critère)
+
+    try:
+        # Vérifier si le compte root a un mot de passe ou unix_socket
+        root_auth = subprocess.getoutput("mysql -u root -Nse \"SELECT plugin FROM mysql.user WHERE User='root' AND Host='localhost';\"")
+
+        if "unix_socket" in root_auth:
+            log("[✔] L'authentification root se fait via unix_socket (sécurisé).")
+            score += 1
+        elif root_auth.strip():
+            log("[⚠] L'authentification root utilise un mot de passe sécurisé.")
+            score += 1
+        else:
+            log("[✖] Problème : L'authentification root n'est pas sécurisée !")
+
+        # Vérifier si l'accès root distant est désactivé
+        root_remote = subprocess.getoutput("mysql -u root -Nse \"SELECT Host FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost', '127.0.0.1', '::1');\"")
+
+        if root_remote.strip() == "":
+            log("[✔] L'accès root distant est désactivé.")
+            score += 1
+        else:
+            log("[✖] Attention : L'accès root distant est activé ! Sécurisez-le.")
+
+        # Vérifier si la base de test a été supprimée
+        test_db = subprocess.getoutput("mysql -u root -Nse \"SHOW DATABASES LIKE 'test';\"")
+
+        if test_db.strip() == "":
+            log("[✔] La base de test a été supprimée (bon point pour la sécurité).")
+            score += 1
+        else:
+            log("[✖] La base de test existe toujours ! Pensez à la supprimer.")
+
+    except Exception as e:
+        log(f"[✖] Erreur lors de la vérification de la sécurité de MariaDB : {e}")
+
+
 
 def check_phpmyadmin():
     """ Vérifie que phpMyAdmin est installé, configuré et accessible """
@@ -261,33 +307,50 @@ def check_php_extensions():
     else:
         log("[✖] L'extension intl n'est pas activée dans PHP")
 
-
 def get_glpi_vhost():
-    """ Récupère le ServerName du VirtualHost GLPI """
+    """Récupère le ServerName du VirtualHost GLPI et vérifie qu'il correspond bien au domaine attendu."""
+    global score, total
+    total += 1  # Ajoute un point total pour cette vérification
+
     try:
         with open("/etc/apache2/sites-available/glpi.conf", "r") as f:
             content = f.read()
 
         match = re.search(r"ServerName\s+(\S+)", content)
         if match:
-            return match.group(1)  # Retourne le ServerName trouvé
+            vhost = match.group(1)  # Récupère le ServerName trouvé
+            log(f"[ℹ] GLPI est configuré sur {vhost}")
+
+            # Vérification que le ServerName se termine bien par le domaine attendu
+            if vhost.endswith(f".{EXPECTED_DOMAIN}"):
+                log(f"[✔] Le domaine GLPI ({vhost}) est bien dans {EXPECTED_DOMAIN}")
+                score += 1  # ✅ Ajout du point si la correspondance est bonne
+            else:
+                log(f"[✖] Le domaine GLPI ({vhost}) ne correspond pas à l'attendu (*.{EXPECTED_DOMAIN})")
+
+            return vhost
         else:
+            log("[✖] Aucun ServerName trouvé pour GLPI dans la configuration Apache.")
             return None
+
     except Exception as e:
         log(f"[✖] Impossible de lire le VirtualHost GLPI : {e}")
         return None
+ 
+
 
 def check_glpi():
     """ Vérifie que GLPI est installé et accessible via son VirtualHost """
     global score, total
-    total += 1
+    total += 2
 
     vhost = get_glpi_vhost()
     if not vhost:
         log("[✖] Aucun ServerName trouvé pour GLPI, impossible de tester l'accès HTTP")
         return
 
-    log("[ℹ] GLPI est configuré sur {vhost}, test de l'accès HTTP...")
+    log(f"[ℹ] GLPI est configuré sur {vhost}, test de l'accès HTTP...")
+    score += 1
 
     try:
         response = requests.get(f"http://{vhost}", timeout=3)
@@ -328,7 +391,6 @@ def check_services():
             inactive.append(service)
 
 
-
 # Exécution des tests
 print("\n===== Vérification de la configuration =====\n")
 check_hostname()
@@ -336,6 +398,7 @@ check_static_ip()
 check_hosts()
 check_dns()
 check_packages()
+check_mariadb_security()
 check_phpmyadmin()
 check_glpi_db()
 check_php_extensions()
@@ -361,14 +424,12 @@ else:
 print("\n".join(log_messages))
 
 # Fonction pour envoyer les résultats
-import requests
-import json
 
 def envoyer_donnees(nom, prenom, commentaires, note):
     """Envoie les résultats du test au serveur externe en JSON avec filename en paramètre d'URL."""
     
     # Définir le nom du fichier attendu par le serveur
-    filename = f"{nom}-{prenom}.txt"
+    filename = f"GLPI-{nom}-{prenom}.txt"
     
     # Construire l'URL avec le paramètre filename
     url = f"http://www.imcalternance.com/logsapi/logreceiver.php?filename={filename}"
@@ -395,9 +456,6 @@ def envoyer_donnees(nom, prenom, commentaires, note):
     except Exception as e:
         print(f"\n❌ Erreur lors de l'envoi : {e}")
 
-# Demander le nom et le prénom de l'utilisateur
-nom = input("\nEntrez votre nom : ")
-prenom = input("Entrez votre prénom : ")
 
 # Transformer les logs en texte avant envoi
 log_output = "\n".join(log_messages)
