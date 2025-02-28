@@ -16,9 +16,9 @@ def install_required_packages():
         try:
             subprocess.run(["dpkg", "-s", pkg], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
-            log(f"[⚠] {pkg} n'est pas installé, installation en cours...")
+#            log(f"[⚠] {pkg} n'est pas installé, installation en cours...")
             subprocess.check_call(["apt", "install", "-y", pkg])
-            log(f"[✔] {pkg} installé avec succès.")
+#            log(f"[✔] {pkg} installé avec succès.")
 
 # Installer les paquets si besoin
 install_required_packages()
