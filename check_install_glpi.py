@@ -439,7 +439,7 @@ def envoyer_donnees(nom, prenom, commentaires, note):
         "nom": nom,
         "prenom": prenom,
         "commentaires": commentaires,
-        "note": note
+        "note": score_sur_20
     }
 
     # 🔍 Debug : Afficher le JSON avant envoi
