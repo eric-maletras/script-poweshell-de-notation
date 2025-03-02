@@ -7,16 +7,26 @@ $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
 $nomSiteWeb = Read-Host "Entrez le nom du site web (ex: glpi)"
 
 # Initialisation du fichier de log
-$logFile = "C:\$($nom)-$($prenom).txt"
+$jsonFile = "C:\AD-$($nom)-$($prenom).json"
 
-# Fonction pour écrire dans le log
+# Initialisation d'un tableau pour stocker les logs
+$logMessages = @()
+
 function Write-Log {
     param (
         [string]$Message
     )
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    "$timestamp - $Message" | Out-File -Append -FilePath $logFile -Encoding UTF8
+    $logEntry = "$timestamp - $Message"
+
+    # Ajouter chaque entrée au tableau des logs
+    $global:logMessages += $logEntry
+
+    # Également afficher la ligne dans la console (utile pour debug)
+    Write-Output $logEntry
 }
+
+
 
 # Vérification des points demandés
 $note = 0
@@ -123,55 +133,55 @@ if ($suffixDNS -eq $domaine) {
 
 $totalPoints = $totalPoints + 11
 # 10 - Vérification de l'installation du rôle AD DS
-Write-Host "Vérification de la présence du rôle Active Directory Domain Services..."
+# Write-Host "Vérification de la présence du rôle Active Directory Domain Services..."
 $adRole = Get-WindowsFeature -Name AD-Domain-Services
 
 if ($adRole.Installed) {
-    Write-Host "Le rôle AD DS est installé." -ForegroundColor Green
+    Write-Log "[OK] Le rôle AD DS est installé." -ForegroundColor Green
     $note++
 
     # Vérification si la machine est un contrôleur de domaine (DC)
     $domainRole = (Get-WmiObject Win32_ComputerSystem).DomainRole
     if ($domainRole -eq 5) {
-        Write-Host "Le serveur est promu en contrôleur de domaine." -ForegroundColor Green
+        Write-Log "[OK] Le serveur est promu en contrôleur de domaine." -ForegroundColor Green
         $note++
 
         # 11 - Vérification du service AD DS
         Write-Host "Vérification du service NTDS..."
         if ((Get-Service -Name NTDS -ErrorAction SilentlyContinue).Status -eq "Running") {
-            Write-Host "Le service NTDS est actif." -ForegroundColor Green
+            Write-Log "[OK] Le service NTDS est actif." -ForegroundColor Green
             $note++
         } else {
-            Write-Host "Le service NTDS n'est PAS actif !" -ForegroundColor Red
+            Write-Log "[ERREUR] Le service NTDS n'est PAS actif !" -ForegroundColor Red
         }
 
         # 12 - Vérification du contrôleur de domaine
         Write-Host "Vérification de la présence d'un contrôleur de domaine..."
         if (Get-ADDomainController -Discover -ErrorAction SilentlyContinue) {
-            Write-Host "Un contrôleur de domaine a été détecté." -ForegroundColor Green
+            Write-Log "[OK] Un contrôleur de domaine a été détecté." -ForegroundColor Green
             $note++
         } else {
-            Write-Host "Aucun contrôleur de domaine trouvé !" -ForegroundColor Red
+            Write-Log "[ERREUR] Aucun contrôleur de domaine trouvé !" -ForegroundColor Red
         }
 
         # 13 - Vérification du domaine AD
         Write-Host "Vérification du domaine AD..."
         try {
             $domain = Get-ADDomain -ErrorAction Stop
-            Write-Host "Domaine détecté : $($domain.DNSRoot)" -ForegroundColor Green
+            Write-Log "[OK] Domaine détecté : $($domain.DNSRoot)" -ForegroundColor Green
             $note++
         } catch {
-            Write-Host "Aucun domaine AD trouvé !" -ForegroundColor Red
+            Write-Log "[ERREUR] Aucun domaine AD trouvé !" -ForegroundColor Red
         }
 
         # 14 - Vérification de la forêt AD
         Write-Host "Vérification de la forêt AD..."
         try {
             $forest = Get-ADForest -ErrorAction Stop
-            Write-Host "Forêt détectée : $($forest.Name)" -ForegroundColor Green
+            Write-log "[OK] Forêt détectée : $($forest.Name)" -ForegroundColor Green
             $note++
         } catch {
-            Write-Host "Aucune forêt AD trouvée !" -ForegroundColor Red
+            Write-Log "[ERREUR] Aucune forêt AD trouvée !" -ForegroundColor Red
         }
 
         # 15 - Vérification des rôles FSMO
@@ -179,13 +189,13 @@ if ($adRole.Installed) {
         try {
             $fsmoRoles = netdom query fsmo 2>$null | ForEach-Object { $_ -replace "\s+", " " }  # Supprime les espaces multiples
             if ($fsmoRoles) {
-                Write-Host "Tous les rôles FSMO sont bien attribués." -ForegroundColor Green
+                Write-Log "[OK] Tous les rôles FSMO sont bien attribués." -ForegroundColor Green
                 $note++
             } else {
-                Write-Host "Impossible de récupérer les rôles FSMO !" -ForegroundColor Red
+                Write-Log "[ERREUR] Impossible de récupérer les rôles FSMO !" -ForegroundColor Red
             }
         } catch {
-            Write-Host "Erreur lors de la récupération des rôles FSMO !" -ForegroundColor Red
+            Write-log "Erreur lors de la récupération des rôles FSMO !" -ForegroundColor Red
         }
 
 
@@ -194,13 +204,13 @@ if ($adRole.Installed) {
         try {
             $domainName = (Get-ADDomain).DNSRoot
             if ($domainName -and (Resolve-DnsName -Name $domainName -Server 127.0.0.1 -ErrorAction SilentlyContinue)) {
-                Write-Host "La résolution DNS du domaine '$domainName' est correcte." -ForegroundColor Green
+                Write-Log "[OK] La résolution DNS du domaine '$domainName' est correcte." -ForegroundColor Green
                 $note++
             } else {
-                Write-Host "Problème de résolution DNS pour $domainName !" -ForegroundColor Red
+                Write-Log "[ERREUR] Problème de résolution DNS pour $domainName !" -ForegroundColor Red
             }
         } catch {
-            Write-Host "Impossible de récupérer le DNS du domaine." -ForegroundColor Red
+            Write-Log "[ERREUR] Impossible de récupérer le DNS du domaine." -ForegroundColor Red
         }
 
 
@@ -209,13 +219,13 @@ if ($adRole.Installed) {
         try {
             $replicationStatus = repadmin /showrepl 2>$null | Select-String "successfully"  # Filtrer uniquement les lignes pertinentes
             if ($replicationStatus) {
-                Write-Host "La réplication AD est fonctionnelle." -ForegroundColor Green
+                Write-log "[OK] La réplication AD est fonctionnelle." -ForegroundColor Green
                 $note++
             } else {
-                Write-Host "Attention : La réplication AD ne semble pas totalement fonctionnelle." -ForegroundColor Yellow
+                Write-log "[ERREUR] Attention : La réplication AD ne semble pas totalement fonctionnelle." -ForegroundColor Yellow
             }
         } catch {
-            Write-Host "Impossible d'exécuter 'repadmin', l'outil n'est peut-être pas disponible." -ForegroundColor Red
+            Write-log "[ERREUR] Impossible d'exécuter 'repadmin', l'outil n'est peut-être pas disponible." -ForegroundColor Red
         }
 
         # 18 - Vérification de l'OU racine correspondant au domaine
@@ -224,10 +234,10 @@ if ($adRole.Installed) {
         $ouRoot = "OU=@labo.lan,$domainDN"
 
         if (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouRoot'" -ErrorAction SilentlyContinue) {
-            Write-Host "L'OU racine '$ouRoot' existe bien." -ForegroundColor Green
+            Write-log "[OK] L'OU racine '$ouRoot' existe bien." -ForegroundColor Green
             $note++
         } else {
-            Write-Host "L'OU racine n'existe pas !" -ForegroundColor Red
+            Write-log "[ERREUR] L'OU racine n'existe pas !" -ForegroundColor Red
         }
 
         # 19 - Vérification de l'OU "Utilisateurs" sous l'OU racine
@@ -235,10 +245,10 @@ if ($adRole.Installed) {
         $ouUsers = "OU=utilisateurs,$ouRoot"
         
         if (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouUsers'" -ErrorAction SilentlyContinue) {
-            Write-Host "L'OU 'Utilisateurs' existe : $ouUsers" -ForegroundColor Green
+            Write-Log "[OK] L'OU 'Utilisateurs' existe : $ouUsers" -ForegroundColor Green
             $note++
         } else {
-            Write-Host "L'OU 'Utilisateurs' n'existe pas !" -ForegroundColor Red
+            Write-Log "[ERREUR] L'OU 'Utilisateurs' n'existe pas !" -ForegroundColor Red
         }
 
         # 20 - Vérification de la présence d'au moins un utilisateur dans l'OU "Utilisateurs"
@@ -246,35 +256,62 @@ if ($adRole.Installed) {
         $usersCount = (Get-ADUser -Filter * -SearchBase "$ouUsers" -ErrorAction SilentlyContinue | Measure-Object).Count
 
         if ($usersCount -gt 0) {
-            Write-Host "Nombre d'utilisateurs trouvés dans l'OU 'Utilisateurs' : $usersCount" -ForegroundColor Green
+            Write-log "[OK] Nombre d'utilisateurs trouvés dans l'OU 'Utilisateurs' : $usersCount" -ForegroundColor Green
             $note++
         } else {
-            Write-Host "Aucun utilisateur trouvé dans l'OU 'Utilisateurs' !" -ForegroundColor Red
+            Write-log "[ERREUR] Aucun utilisateur trouvé dans l'OU 'Utilisateurs' !" -ForegroundColor Red
         }
 
     } else {
-        Write-Host "Le rôle AD DS est installé mais la machine n'est PAS promue en contrôleur de domaine. Aucun test AD ne sera effectué." -ForegroundColor Yellow
+        Write-Log "[ERREUR] Le rôle AD DS est installé mais la machine n'est PAS promue en contrôleur de domaine. Aucun test AD ne sera effectué." -ForegroundColor Yellow
     }
 
 } else {
-    Write-Host "Le rôle Active Directory Domain Services n'est PAS installé. Aucun test AD ne sera effectué." -ForegroundColor Red
+    Write-Log "[ERREUR] Le rôle Active Directory Domain Services n'est PAS installé. Aucun test AD ne sera effectué." -ForegroundColor Red
 }
 
 
 
 # Calcul de la note
-$finalNote = [math]::Round(($note / $totalPoints) * 20, 1)
-Write-Log "Vérifications terminées. Note obtenue: $finalNote / 20"
+#$finalNote = [math]::Round(($note / $totalPoints) * 20, 1)
 
-Write-Host "Le rapport de vérification a été généré: $logFile"
-Write-Host "Note finale: $finalNote / 20"
+# Calcul de la note sur 20
+$scoreSur20 = if ($totalPoints -gt 0) { [math]::Round(($note / $totalPoints) * 20, 2) } else { 0 }
 
-# Envoi du log sur le site externe
-$logContent = Get-Content -Path $logFile -Raw
-Invoke-RestMethod -Uri "http://www.imcalternance.com/logsapi/logreceiver.php?filename=$nom-$prenom.txt" `
-                  -Method Post `
-                  -Body $logContent `
-                  -ContentType "text/plain; charset=utf-8"
+# Transformation de la liste en une seule chaîne avec sauts de ligne
+$logDetails = $logMessages -join "`n"
+
+# Génération du JSON
+$jsonData = @{
+    "status"    = "OK"
+    "timestamp" = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    "nom"       = $nom
+    "prenom"    = $prenom
+    "score"     = $note
+    "total"     = $totalPoints
+    "note"      = if ($totalPoints -gt 0) { [math]::Round(($note / $totalPoints) * 20, 2) } else { 0 }
+    "commentaires"   = $logDetails  # ✅ Ici, on force le format avec des \n
+} | ConvertTo-Json -Depth 3
+
+
+# Sauvegarde du fichier JSON
+$jsonData | Set-Content -Path $jsonFile -Encoding UTF8
+
+Write-Output "✅ Fichier JSON généré : $jsonFile"
+
+# ---- Envoi du fichier JSON vers logreceiver.php ----
+
+# URL du serveur PHP qui reçoit les données
+$serverUrl = "http://www.imcalternance.com/logsapi/logreceiver.php?filename=AD-$($nom)-$($prenom).json"
+
+# Envoi via une requête POST
+try {
+    Invoke-RestMethod -Uri $serverUrl -Method Post -Body $jsonData -ContentType "application/json; charset=utf-8"
+    Write-Output "✅ Fichier JSON envoyé avec succès !"
+} catch {
+    Write-Output "❌ Erreur lors de l'envoi du fichier JSON : $_"
+}
+
 
 # Attendre avant de fermer
 Read-Host -Prompt "Appuyez sur Entrée pour quitter"
