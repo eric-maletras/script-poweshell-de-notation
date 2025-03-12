@@ -114,6 +114,17 @@ function Check-Hostname {
     }
 }
 
+function Check-InstalledSoftware {
+    param ([string]$SoftwareName)
+
+    $installed = Get-WmiObject -Query "SELECT Name FROM Win32_Product WHERE Name LIKE '%$SoftwareName%'" -ErrorAction SilentlyContinue
+    if ($installed) {
+        Write-Log "[OK] Le logiciel '$SoftwareName' est installé."
+    } else {
+        Write-Log "[ERREUR] Le logiciel '$SoftwareName' n'est pas installé."
+    }
+}
+
 # Exécution des tests
 $global:score = 0
 $global:totalPoints = 0
