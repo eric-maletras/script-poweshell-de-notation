@@ -3,7 +3,7 @@ $NomVM = "srv-2019"
 $SuffixeDNS = "labo.lan"
 $LogFolder = "C:\Logs"
 $LogFile = "$LogFolder\VM_Check.log"
-$JsonFile = "$LogFolder\VM_Check-$nom-$prenom.json"
+$JsonFile = "$LogFolder\VM_2019_Check-$nom-$prenom.json"
 
 # Création du dossier Logs s'il n'existe pas
 if (!(Test-Path $LogFolder)) {
