@@ -5,12 +5,12 @@ $LogFolder = "C:\Logs"
 $LogFile = "$LogFolder\VM_Check.log"
 $JsonFile = "$LogFolder\CheckVM2019-$nom-$prenom.json"
 
-# Création du dossier Logs s'il n'existe pas
+# CrÃ©ation du dossier Logs s'il n'existe pas
 if (!(Test-Path $LogFolder)) {
     New-Item -ItemType Directory -Path $LogFolder | Out-Null
 }
 
-# Demande des informations à l'utilisateur
+# Demande des informations Ã  l'utilisateur
 $nom = Read-Host "Entrez votre nom"
 $prenom = Read-Host "Entrez votre prénom"
 $NomVM = Read-Host "Entrez le Nom de la VM"
@@ -28,14 +28,14 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $logEntry
 }
 
-# Vérifications
+# VÃ©rifications
 function Check-InternetAccess {
     $global:totalPoints++
     if (Test-NetConnection -ComputerName "google.com" -InformationLevel Quiet) {
-        Write-Log "[OK] Accès à Internet disponible."
+        Write-Log "[OK] Accés à  Internet disponible."
         $global:score++
     } else {
-        Write-Log "[ERREUR] Pas d'accès à Internet."
+        Write-Log "[ERREUR] Pas d'accés à  Internet."
     }
 }
 
@@ -55,26 +55,39 @@ function Check-IEESC {
     }
 }
 
+
+
 function Check-PingFirewall {
-    $global:totalPoints++
-    $pingIn = Get-NetFirewallRule -DisplayName "Partage de fichiers et d’imprimantes (Demande d’écho - Trafic entrant ICMPv4)" -ErrorAction SilentlyContinue
-    $pingOut = Get-NetFirewallRule -DisplayName "Partage de fichiers et d’imprimantes (Demande d’écho - Trafic sortant ICMPv4)" -ErrorAction SilentlyContinue
-    if ($pingIn.Enabled -eq $true -and $pingOut.Enabled -eq $true) {
-        Write-Log "[OK] Ping autorisé en entrée et en sortie."
-        $global:score++
-    } else {
-        Write-Log "[ERREUR] Ping non entièrement autorisé."
-    }
+# Vérifier si la règle pare-feu ICMPv4 est activée en entrée
+$global:totalPoints++
+$ruleInbound = Get-NetFirewallRule | Where-Object { $_.DisplayName -match "ICMPv4" -and $_.Direction -eq "Inbound" }
+if ($ruleInbound -and $ruleInbound.Enabled -eq "True") {
+    Write-Log "[OK] La règle pare-feu ICMPv4 entrante est activée."
+    $global:score++
+} else {
+    Write-Log "[ERREUR] Aucune règle pare-feu ICMPv4 entrante activée détectée."
+}
+
+# Vérifier si la règle pare-feu ICMPv4 est activée en sortie
+$global:totalPoints++
+$ruleOutbound = Get-NetFirewallRule | Where-Object { $_.DisplayName -match "ICMPv4" -and $_.Direction -eq "Outbound" }
+if ($ruleOutbound -and $ruleOutbound.Enabled -eq "True") {
+    Write-Log "[OK] La règle pare-feu ICMPv4 sortante est activée."
+    $global:score++
+} else {
+    Write-Log "[ERREUR] Aucune règle pare-feu ICMPv4 sortante activée détectée."
+}
+
 }
 
 function Check-RDP {
     $global:totalPoints++
     $rdpStatus = (Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections").fDenyTSConnections
     if ($rdpStatus -eq 0) {
-        Write-Log "[OK] Bureau à Distance activé."
+        Write-Log "[OK] Bureau Ã  Distance activé."
         $global:score++
     } else {
-        Write-Log "[ERREUR] Bureau à Distance désactivé."
+        Write-Log "[ERREUR] Bureau Ã  Distance désactivé."
     }
 }
 
@@ -116,14 +129,29 @@ function Check-Hostname {
 
 function Check-InstalledSoftware {
     param ([string]$SoftwareName)
-
-    $installed = Get-WmiObject -Query "SELECT Name FROM Win32_Product WHERE Name LIKE '%$SoftwareName%'" -ErrorAction SilentlyContinue
-    if ($installed) {
+    
+    $global:totalPoints++
+    $paths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $found = $false
+    foreach ($path in $paths) {
+        $installed = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*$SoftwareName*" }
+        if ($installed) {
+            $found = $true
+            break
+        }
+    }
+    
+    if ($found) {
         Write-Log "[OK] Le logiciel '$SoftwareName' est installé."
+        $global:score++
     } else {
         Write-Log "[ERREUR] Le logiciel '$SoftwareName' n'est pas installé."
     }
 }
+
 
 # Exécution des tests
 $global:score = 0
@@ -144,7 +172,7 @@ foreach ($software in $softwares) {
 # Calcul de la note finale
 $finalScore = if ($global:totalPoints -gt 0) { [math]::Round(($global:score / $global:totalPoints) * 20, 2) } else { 0 }
 
-# Génération du JSON
+# GÃ©nÃ©ration du JSON
 $jsonData = @{
     "status"    = "OK"
     "timestamp" = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -158,15 +186,15 @@ $jsonData = @{
 
 # Sauvegarde du fichier JSON
 $jsonData | Set-Content -Path $JsonFile -Encoding UTF8
-Write-Log "✅ Fichier JSON généré : $JsonFile"
+Write-Log "… Fichier JSON généré : $JsonFile"
 
 # Envoi du fichier JSON vers le serveur
 $serverUrl = "http://www.imcalternance.com/logsapi/logreceiver.php?filename=VM_Check-$nom-$prenom.json"
 try {
     Invoke-RestMethod -Uri $serverUrl -Method Post -Body $jsonData -ContentType "application/json; charset=utf-8"
-    Write-Log "✅ Fichier JSON envoyé avec succès !"
+    Write-Log "… Fichier JSON envoyé avec succès !"
 } catch {
-    Write-Log "❌ Erreur lors de l'envoi du fichier JSON : $_"
+    Write-Log "Erreur lors de l'envoi du fichier JSON : $_"
 }
 
 Read-Host -Prompt "Appuyez sur Entrée pour quitter"
