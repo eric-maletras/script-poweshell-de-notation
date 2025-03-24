@@ -6,6 +6,7 @@ import subprocess
 import socket
 import re
 import json
+from datetime import datetime
 
 # Liste des bibliothèques requises sous Debian
 REQUIRED_APT_LIBS = ["python3-requests", "python3-bs4"]
@@ -390,6 +391,63 @@ def check_services():
             log("f[✖] {service} est inactif")
             inactive.append(service)
 
+def check_boot_time():
+    """
+    Mesure le temps écoulé depuis le premier boot du jour et attribue un score sur 5 points.
+    - Temps écoulé <= XX minutes => 5 points
+    - Pour chaque tranche de 22,5 minutes (1/4 de 90 minutes) en plus, on retire 1 point.
+    """
+    global score, total
+    total += 5  # Ce test vaut 5 points
+    try:
+        result = subprocess.run(["journalctl", "--list-boots"], capture_output=True, text=True)
+        if result.returncode != 0 or not result.stdout:
+            log("[✖] Erreur : Impossible de récupérer les informations de boot.")
+            return
+
+        boots = []
+        lines = result.stdout.splitlines()
+        # Ignorer la première ligne (en-tête) et parcourir les boots
+        for line in lines[1:]:
+            parts = line.split()
+            # On retire le fuseau horaire : on prend uniquement les 3 premiers éléments de la date
+            boot_time_str = " ".join(parts[2:5])
+            boot_time = datetime.strptime(boot_time_str, "%a %Y-%m-%d %H:%M:%S")
+            boots.append(boot_time)
+
+        today = datetime.now().date()
+        boots_today = [b for b in boots if b.date() == today]
+        if not boots_today:
+            log("[✖] Aucun boot trouvé pour aujourd'hui.")
+            return
+
+        first_boot = min(boots_today)
+        now = datetime.now()
+        elapsed_time = now - first_boot
+        elapsed_seconds = elapsed_time.total_seconds()
+
+        # Temps imparti de 90 minutes (5400 secondes)
+        temps_imparti = 40 * 60
+        if elapsed_seconds <= temps_imparti:
+            points = 5
+        else:
+            extra = elapsed_seconds - temps_imparti
+            quarter = temps_imparti / 4  # 22,5 minutes
+            points = 5 - int(extra // quarter)
+            if points < 0:
+                points = 0
+
+        log(f"[ℹ] Premier boot du jour : {first_boot}")
+        log(f"[ℹ] Temps écoulé depuis le premier boot d'aujourd'hui : {elapsed_time}")
+        log(f"[:] Temps imparti inital: 40 mn")
+        log(f"[ℹ] Score boot time attribué : {points}/5")
+        score += points
+
+    except Exception as e:
+        log(f"[✖] Erreur lors de la vérification du temps de boot : {e}")
+
+
+
 
 # Exécution des tests
 print("\n===== Vérification de la configuration =====\n")
@@ -404,7 +462,7 @@ check_glpi_db()
 check_php_extensions()
 check_glpi()
 check_services()
-
+check_boot_time()
 
 # Calcul de la note normalisée sur 20
 score_sur_20 = round((score / total) * 20, 2) if total > 0 else 0
@@ -429,7 +487,7 @@ def envoyer_donnees(nom, prenom, commentaires, note):
     """Envoie les résultats du test au serveur externe en JSON avec filename en paramètre d'URL."""
     
     # Définir le nom du fichier attendu par le serveur
-    filename = f"GLPI-{nom}-{prenom}.txt"
+    filename = f"GLPI-{nom}-{prenom}.json"
     
     # Construire l'URL avec le paramètre filename
     url = f"http://www.imcalternance.com/logsapi/logreceiver.php?filename={filename}"
