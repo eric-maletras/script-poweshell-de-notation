@@ -398,7 +398,7 @@ def check_boot_time():
     - Pour chaque tranche de 22,5 minutes (1/4 de 90 minutes) en plus, on retire 1 point.
     """
     global score, total
-    total += 5  # Ce test vaut 5 points
+    total += 7  # Ce test vaut 5 points
     try:
         result = subprocess.run(["journalctl", "--list-boots"], capture_output=True, text=True)
         if result.returncode != 0 or not result.stdout:
@@ -429,24 +429,53 @@ def check_boot_time():
         # Temps imparti de 90 minutes (5400 secondes)
         temps_imparti = 40 * 60
         if elapsed_seconds <= temps_imparti:
-            points = 5
+            points = 7
         else:
             extra = elapsed_seconds - temps_imparti
             quarter = temps_imparti / 4  # 22,5 minutes
-            points = 5 - int(extra // quarter)
+            points = 7 - int(extra // quarter)
             if points < 0:
                 points = 0
 
         log(f"[ℹ] Premier boot du jour : {first_boot}")
         log(f"[ℹ] Temps écoulé depuis le premier boot d'aujourd'hui : {elapsed_time}")
         log(f"[:] Temps imparti inital: 40 mn")
-        log(f"[ℹ] Score boot time attribué : {points}/5")
+        log(f"[ℹ] Score boot time attribué : {points}/7")
         score += points
 
     except Exception as e:
         log(f"[✖] Erreur lors de la vérification du temps de boot : {e}")
 
 
+def check_vm_freshness():
+    """
+    Vérifie que les fichiers critiques (Apache, MariaDB, GLPI) sont du jour.
+    Si l'un de ces fichiers n'est pas du jour, affiche un message d'alerte et remet à 0 le score global.
+    """
+    global score, total
+    today = datetime.now().date()
+    fraud_detected = False
+    files_to_check = [
+        ("/etc/apache2/apache2.conf", "Fichier Apache"),
+        ("/etc/mysql/mariadb.conf.d/50-server.cnf", "Fichier MariaDB"),
+        ("/var/www/glpi/index.php", "Fichier GLPI")
+    ]
+    for file_path, label in files_to_check:
+        try:
+            stat_info = os.stat(file_path)
+            file_date = datetime.fromtimestamp(stat_info.st_ctime).date()
+            if file_date != today:
+                log(f"[✖] {label} ({file_path}) n'est pas du jour (date trouvée : {file_date}). Vous avez tenté de frauder !")
+                fraud_detected = True
+            else:
+                log(f"[✔] {label} ({file_path}) est du jour : {file_date}.")
+        except Exception as e:
+            log(f"[✖] Erreur lors de la vérification de {label} ({file_path}) : {e}")
+            fraud_detected = True
+    if fraud_detected:
+        # Remise à zéro du score global pour détecter la tentative de fraude
+        score = 0
+        total = 0
 
 
 # Exécution des tests
@@ -463,6 +492,7 @@ check_php_extensions()
 check_glpi()
 check_services()
 check_boot_time()
+check_vm_freshness()
 
 # Calcul de la note normalisée sur 20
 score_sur_20 = round((score / total) * 20, 2) if total > 0 else 0
