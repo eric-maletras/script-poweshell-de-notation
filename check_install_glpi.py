@@ -427,7 +427,7 @@ def check_boot_time():
         elapsed_seconds = elapsed_time.total_seconds()
 
         # Temps imparti de 90 minutes (5400 secondes)
-        temps_imparti = 55 * 60
+        temps_imparti = 90 * 60
         if elapsed_seconds <= temps_imparti:
             points = 7
         else:
@@ -439,7 +439,7 @@ def check_boot_time():
 
         log(f"[ℹ] Premier boot du jour : {first_boot}")
         log(f"[ℹ] Temps écoulé depuis le premier boot d'aujourd'hui : {elapsed_time}")
-        log(f"[:] Temps imparti inital: 55 mn")
+        log(f"[:] Temps imparti inital: 90 mn")
         log(f"[ℹ] Score boot time attribué : {points}/7")
         score += points
 
