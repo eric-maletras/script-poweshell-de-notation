@@ -262,24 +262,24 @@ function Check-ElapsedTimeScore {
         $elapsedMinutes = $elapsed.TotalMinutes
         Write-Log "Temps écoulé en minutes : $elapsedMinutes"
         
-        # Attribution du score sur 7 points
+        # Attribution du score sur 8 points
         if ($elapsedMinutes -le $DefinedTime) {
-            $score = 7
-            Write-Log "Délai optimal (<= $DefinedTime minutes). Score = $score / 7"
+            $score = 8
+            Write-Log "Délai optimal (<= $DefinedTime minutes). Score = $score / 8"
         }
         elseif ($elapsedMinutes -ge (2 * $DefinedTime)) {
             $score = 0
-            Write-Log "Délai trop long (>= {0} minutes). Score = $score / 7" -f (2 * $DefinedTime)
+            Write-Log "Délai trop long (>= {0} minutes). Score = $score / 8" -f (2 * $DefinedTime)
         }
         else {
             # Découpage de la tranche (entre $DefinedTime et 2*$DefinedTime) en 5 intervalles
             $slice = $DefinedTime / 5.0
             $n = [math]::Ceiling(($elapsedMinutes - $DefinedTime) / $slice)
-            $score = 7 - ($n * (7 / 5))
+            $score = 8 - ($n * (8 / 5))
             if ($score -lt 0) { 
                 $score = 0 
             }
-            Write-Log "Délai intermédiaire. (n = $n, tranche = $slice minutes). Score calculé = $score / 7"
+            Write-Log "Délai intermédiaire. (n = $n, tranche = $slice minutes). Score calculé = $score / 8"
         }
         # Mise à jour du score global
         $global:score += $score
@@ -295,7 +295,6 @@ Check-InternetAccess
 Check-IEESC
 Check-PingFirewall
 Check-RDP
-Check-StaticIP
 Check-Hostname
 
 $softwares = @("VMWare Tools", "Mozilla Firefox", "Google Chrome", "PuTTY", "WinSCP", "FileZilla", "7-Zip")
