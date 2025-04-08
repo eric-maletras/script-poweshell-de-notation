@@ -28,6 +28,105 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $logEntry
 }
 
+function Check-InternetAccess {
+    $global:totalPoints++
+    if (Test-NetConnection -ComputerName "google.com" -InformationLevel Quiet) {
+        Write-Log "[OK] Accés à  Internet disponible."
+        $global:score++
+    } else {
+        Write-Log "[ERREUR] Pas d'accés à  Internet."
+    }
+}
+
+function Check-IEESC {
+    $global:totalPoints++
+    $adminKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap"
+    $userKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\ZoneMap"
+    
+    $adminESC = (Get-ItemProperty -Path $adminKey -Name "IEHarden" -ErrorAction SilentlyContinue).IEHarden
+    $userESC = (Get-ItemProperty -Path $userKey -Name "IEHarden" -ErrorAction SilentlyContinue).IEHarden
+
+    if (($adminESC -eq $null -or $adminESC -eq 0) -and ($userESC -eq $null -or $userESC -eq 0)) {
+        Write-Log "[OK] Sécurité IE désactivée pour les administrateurs et les utilisateurs."
+        $global:score++
+    } else {
+        Write-Log "[ERREUR] Sécurité IE activée."
+    }
+}
+
+
+
+function Check-PingFirewall {
+# Vérifier si la règle pare-feu ICMPv4 est activée en entrée
+$global:totalPoints++
+$ruleInbound = Get-NetFirewallRule | Where-Object { $_.DisplayName -match "ICMPv4" -and $_.Direction -eq "Inbound" }
+if ($ruleInbound -and $ruleInbound.Enabled -eq "True") {
+    Write-Log "[OK] La règle pare-feu ICMPv4 entrante est activée."
+    $global:score++
+} else {
+    Write-Log "[ERREUR] Aucune règle pare-feu ICMPv4 entrante activée détectée."
+}
+
+# Vérifier si la règle pare-feu ICMPv4 est activée en sortie
+$global:totalPoints++
+$ruleOutbound = Get-NetFirewallRule | Where-Object { $_.DisplayName -match "ICMPv4" -and $_.Direction -eq "Outbound" }
+if ($ruleOutbound -and $ruleOutbound.Enabled -eq "True") {
+    Write-Log "[OK] La règle pare-feu ICMPv4 sortante est activée."
+    $global:score++
+} else {
+    Write-Log "[ERREUR] Aucune règle pare-feu ICMPv4 sortante activée détectée."
+}
+
+}
+
+function Check-RDP {
+    $global:totalPoints++
+    $rdpStatus = (Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections").fDenyTSConnections
+    if ($rdpStatus -eq 0) {
+        Write-Log "[OK] Bureau Ã  Distance activé."
+        $global:score++
+    } else {
+        Write-Log "[ERREUR] Bureau Ã  Distance désactivé."
+    }
+}
+
+function Check-Hostname {
+    $global:totalPoints++
+    $hostname = (Get-ComputerInfo).CsName
+    if ($hostname -eq $NomVM) {
+        Write-Log "[OK] Nom de la VM correct."
+        $global:score++
+    } else {
+        Write-Log "[ERREUR] Nom de la VM incorrect."
+    }
+}
+
+function Check-InstalledSoftware {
+    param ([string]$SoftwareName)
+    
+    $global:totalPoints++
+    $paths = @(
+        "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+    $found = $false
+    foreach ($path in $paths) {
+        $installed = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*$SoftwareName*" }
+        if ($installed) {
+            $found = $true
+            break
+        }
+    }
+    
+    if ($found) {
+        Write-Log "[OK] Le logiciel '$SoftwareName' est installé."
+        $global:score++
+    } else {
+        Write-Log "[ERREUR] Le logiciel '$SoftwareName' n'est pas installé."
+    }
+}
+
+
 # Test 1 : Vérifier si le rôle DNS est installé
 function Check-DNSRole {
     $global:totalPoints++
@@ -192,6 +291,17 @@ function Check-ElapsedTimeScore {
 }
 
 # Exécution des tests
+Check-InternetAccess
+Check-IEESC
+Check-PingFirewall
+Check-RDP
+Check-StaticIP
+Check-Hostname
+
+$softwares = @("VMWare Tools", "Mozilla Firefox", "Google Chrome", "PuTTY", "WinSCP", "FileZilla", "7-Zip")
+foreach ($software in $softwares) {
+    Check-InstalledSoftware -SoftwareName $software
+}
 Check-DNSRole
 Check-ZRD
 Check-ZRI
@@ -228,7 +338,7 @@ $jsonData | Set-Content -Path $JsonFile -Encoding UTF8
 Write-Log "… Fichier JSON généré : $JsonFile"
 
 # Envoi du fichier JSON vers le serveur
-$serverUrl = "http://www.imcalternance.com/logsapi/logreceiver.php?filename=DNS_Check-$nom-$prenom.json"
+$serverUrl = "http://www.imcalternance.com/logsapi/logreceiver.php?filename=DNSWin_Check-$nom-$prenom.json"
 try {
     Invoke-RestMethod -Uri $serverUrl -Method Post -Body $jsonData -ContentType "application/json; charset=utf-8"
     Write-Log "… Fichier JSON envoyé avec succès !"
