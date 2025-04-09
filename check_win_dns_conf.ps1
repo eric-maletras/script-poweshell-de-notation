@@ -236,10 +236,10 @@ function Check-DNSSuffix {
     }
 }
 
-# Test 10 : Vérifier le temps écoulé depuis le premier boot de la journée et attribuer un score sur 7
+# Test 10 : Vérifier le temps écoulé depuis le premier boot de la journée et attribuer un score sur 8
 function Check-ElapsedTimeScore {
     param(
-        [int]$DefinedTime = 10  # Temps de référence en minutes
+        [int]$DefinedTime = 30  # Temps de référence en minutes
     )
     
     # Récupérer le premier événement 6005 (démarrage) depuis le début de la journée
@@ -247,8 +247,8 @@ function Check-ElapsedTimeScore {
     $firstBootEvent = Get-WinEvent -FilterHashtable @{LogName="System"; ID=6005; StartTime=$startOfDay} |
                       Sort-Object TimeCreated | Select-Object -First 1
                       
-    # Ajout des 7 points au total pour ce test
-    $global:totalPoints += 7
+    # Ajout des 8 points au total pour ce test
+    $global:totalPoints += 8
 
     if ($firstBootEvent) {
         $firstBootTime = $firstBootEvent.TimeCreated
