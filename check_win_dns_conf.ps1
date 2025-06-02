@@ -14,6 +14,23 @@ $ipMasque = Read-Host "Entrez le masque de sous-réseau (eg: 255.255.255.0)"
 $nomServeurWeb = Read-Host "Entrez le nom du serveur web (eg: srv-web)"
 $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (eg: 192.168.62.3)"
 $nomSiteWeb = Read-Host "Entrez le nom du site web (eg: glpi)"
+
+
+Write-Host "`n===== RÉCAPITULATIF ====="
+Write-Host "Nom           : $nom"
+Write-Host "Prénom        : $prenom"
+Write-Host "Nom de la VM  : $expected_hostname"
+Write-Host "Domaine       : $expected_domain"
+Write-Host "IP attendue   : $expected_ip"
+
+$confirmation = Read-Host "`nLes informations sont-elles correctes ? (O/N)"
+if ($confirmation.ToUpper() -ne "O") {
+    Write-Host "`n❌ Script interrompu. Veuillez relancer avec les bonnes informations." -ForegroundColor Red
+    exit
+}
+
+
+
 $JsonFile = "$LogFolder\DNS_Check-$nom-$prenom.json"
 
 # Initialisation des logs et des compteurs
