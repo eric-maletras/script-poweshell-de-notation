@@ -8,7 +8,7 @@ $LogFile = "$LogFolder\DNS_Check.log"
 # Demande des informations à l'utilisateur
 $nom = Read-Host "Entrez votre nom"
 $prenom = Read-Host "Entrez votre prénom"
-$domaine = Read-Host "Entrez le nom du domaine (ex: labo.lan)"
+$domaine = Read-Host "Entrez le nom du domaine (ex: votrePrenom.lan)"
 $nomServeurWeb = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
 $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
 $nomSiteWeb = Read-Host "Entrez le nom du site web (ex: glpi)"
