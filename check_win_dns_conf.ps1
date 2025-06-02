@@ -5,31 +5,30 @@ if (!(Test-Path $LogFolder)) {
 }
 $LogFile = "$LogFolder\DNS_Check.log"
 
-# Demande des informations à l'utilisateur
 $nom = Read-Host "Entrez votre nom"
 $prenom = Read-Host "Entrez votre prénom"
+$nomVM = Read-Host "Entrez le nom du serveur DNS (VM)"
 $domaine = Read-Host "Entrez le nom du domaine (eg: votrePrenom.lan)"
-$ipRange = Read-Host "Entrez le nom du réseau (eg:192.168.62.0)"
-$ipMasque = Read-Host "Entrez le masque de sous-réseau (eg: 255.255.255.0)"
+$ipRange = Read-Host "Entrez le nom du rÃ©seau (eg:192.168.62.0)"
+$ipMasque = Read-Host "Entrez le masque de sous-rÃ©seau (eg: 255.255.255.0)"
 $nomServeurWeb = Read-Host "Entrez le nom du serveur web (eg: srv-web)"
 $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (eg: 192.168.62.3)"
 $nomSiteWeb = Read-Host "Entrez le nom du site web (eg: glpi)"
 
-
-Write-Host "`n===== RÉCAPITULATIF ====="
-Write-Host "Nom           : $nom"
-Write-Host "Prénom        : $prenom"
-Write-Host "Nom de la VM  : $expected_hostname"
-Write-Host "Domaine       : $expected_domain"
-Write-Host "IP attendue   : $expected_ip"
+Write-Host "`n===== RECAPITULATIF ====="
+Write-Host "Nom                          : $nom"
+Write-Host "Prénom                       : $prenom"
+Write-Host "Nom de la VM                 : $nomVM"
+Write-Host "Domaine                      : $domaine"
+Write-Host "Réseau IP                    : $ipRange / $ipMasque"
+write-Host "Nom du serveur WEB (Record A): $nomServeurWeb"
+write-Host "Nom de l'alias (CNAME)       : $nomSiteWeb"
 
 $confirmation = Read-Host "`nLes informations sont-elles correctes ? (O/N)"
 if ($confirmation.ToUpper() -ne "O") {
-    Write-Host "`n❌ Script interrompu. Veuillez relancer avec les bonnes informations." -ForegroundColor Red
+    Write-Host "`n Script interrompu. Veuillez relancer avec les bonnes informations." -ForegroundColor Red
     exit
 }
-
-
 
 $JsonFile = "$LogFolder\DNS_Check-$nom-$prenom.json"
 
