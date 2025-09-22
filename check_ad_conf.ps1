@@ -6,6 +6,40 @@ $nomServeurWeb = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
 $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
 $nomSiteWeb = Read-Host "Entrez le nom du site web (ex: glpi)"
 
+# $domain est censé contenir le FQDN (ex: "labo.lan")
+
+# 1) Normalisation FQDN sans utiliser '??'
+$DomainDns = ''
+if ($null -ne $domain) { $DomainDns = [string]$domain }
+$DomainDns = $DomainDns.Trim().TrimEnd('.')
+
+if ([string]::IsNullOrWhiteSpace($DomainDns) -or
+    ($DomainDns -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')) {
+    throw "Le domaine saisi '$domain' n'est pas un FQDN valide (ex: labo.lan)."
+}
+
+# 2) Conversion FQDN -> DN : "labo.lan" -> "DC=labo,DC=lan"
+$DomainDN = ( $DomainDns -split '\.' | ForEach-Object { "DC=$_" } ) -join ','
+
+# 3) Récup éventuelle du NetBIOS et du NC (en forçant le -Server)
+try {
+    $ad = Get-ADDomain -Server $DomainDns -ErrorAction Stop
+    $NetBIOS   = $ad.NetBIOSName
+    $DefaultNC = (Get-ADRootDSE -Server $DomainDns -ErrorAction Stop).defaultNamingContext
+
+    if ($ad.DNSRoot -ne $DomainDns) {
+        Write-Host "[AVERTISSEMENT] AD DNSRoot='$($ad.DNSRoot)' ≠ domaine saisi '$DomainDns'."
+    }
+} catch {
+    $NetBIOS   = (($DomainDns -split '\.')[0]).ToUpperInvariant()
+    $DefaultNC = $DomainDN
+}
+
+# Exemple d'utilisation cohérente ensuite :
+# -Server => $DomainDns (FQDN), -SearchBase => $DomainDN ou $DefaultNC
+# Get-ADOrganizationalUnit -Server $DomainDns -SearchBase $DefaultNC -LDAPFilter '(name=Users)'
+# Resolve-DnsName -Name ("_ldap._tcp.dc._msdcs.$DomainDns") -Type SRV -ErrorAction SilentlyContinue
+
 # Initialisation du fichier de log
 $jsonFile = "C:\AD-$($nom)-$($prenom).json"
 
@@ -164,15 +198,26 @@ if ($adRole.Installed) {
             Write-Log "[ERREUR] Aucun contrôleur de domaine trouvé !" -ForegroundColor Red
         }
 
-        # 13 - Vérification du domaine AD
+        # On part du FQDN saisi dans $DomainDns (ex: "labo.lan")
+        # Si tu n'as pas cette variable plus haut, ajoute :
+        # $DomainDns = ([string]$domain).Trim().TrimEnd('.')
+
+        # 13 - Vérification du domaine AD (aligné sur l'input)
         Write-Host "Vérification du domaine AD..."
         try {
-            $domain = Get-ADDomain -ErrorAction Stop
-            Write-Log "[OK] Domaine détecté : $($domain.DNSRoot)" -ForegroundColor Green
+          # Interroge **ce** domaine
+          $ad = Get-ADDomain -Server $DomainDns -ErrorAction Stop
+
+          if ($ad.DNSRoot -ieq $DomainDns) {
+            Write-Log "[OK] Domaine AD détecté et conforme à l'input : $($ad.DNSRoot)" -ForegroundColor Green
             $note++
+          } else {
+            Write-Log "[ERREUR] Le domaine AD détecté '$($ad.DNSRoot)' ne correspond pas au domaine saisi '$DomainDns'." -ForegroundColor Red
+         }
         } catch {
-            Write-Log "[ERREUR] Aucun domaine AD trouvé !" -ForegroundColor Red
+         Write-Log "[ERREUR] Impossible d'interroger le domaine '$DomainDns' : $($_.Exception.Message)" -ForegroundColor Red
         }
+
 
         # 14 - Vérification de la forêt AD
         Write-Host "Vérification de la forêt AD..."
