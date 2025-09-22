@@ -355,7 +355,7 @@ $jsonData | Set-Content -Path $JsonFile -Encoding UTF8
 Write-Log "… Fichier JSON généré : $JsonFile"
 
 # Envoi du fichier JSON vers le serveur
-$serverUrl = "http://www.imcalternance.com/logsapi/logreceiver.php?filename=DNSWin_Check-$nom-$prenom.json"
+$serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=DNSWin_Check-$nom-$prenom.json"
 try {
     Invoke-RestMethod -Uri $serverUrl -Method Post -Body $jsonData -ContentType "application/json; charset=utf-8"
     Write-Log "… Fichier JSON envoyé avec succès !"
