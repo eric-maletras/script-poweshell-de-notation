@@ -222,10 +222,10 @@ if ($adRole.Installed) {
                 Write-log "[OK] La réplication AD est fonctionnelle." -ForegroundColor Green
                 $note++
             } else {
-                Write-log "[ERREUR] Attention : La réplication AD ne semble pas totalement fonctionnelle." -ForegroundColor Yellow
+                Write-log "[WARNING] Attention : La réplication AD ne semble pas totalement fonctionnelle." -ForegroundColor Yellow
             }
         } catch {
-            Write-log "[ERREUR] Impossible d'exécuter 'repadmin', l'outil n'est peut-être pas disponible." -ForegroundColor Red
+            Write-log "[WARNING] Impossible d'exécuter 'repadmin', l'outil n'est peut-être pas disponible." -ForegroundColor Red
         }
 
         # 18 - Vérification de l'OU racine correspondant au domaine
@@ -302,7 +302,7 @@ Write-Output "✅ Fichier JSON généré : $jsonFile"
 # ---- Envoi du fichier JSON vers logreceiver.php ----
 
 # URL du serveur PHP qui reçoit les données
-$serverUrl = "http://www.imcalternance.com/logsapi/logreceiver.php?filename=AD-$($nom)-$($prenom).json"
+$serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=AD-$($nom)-$($prenom).json"
 
 # Envoi via une requête POST
 try {
