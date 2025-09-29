@@ -1,10 +1,14 @@
 # Demande des informations à l'utilisateur
 $nom = Read-Host "Entrez votre nom"
 $prenom = Read-Host "Entrez votre prénom"
-$domaine = Read-Host "Entrez le nom du domaine"
+$domain = Read-Host "Entrez le nom du domaine"
+$lettreDisqueSup = Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut) 
+if (-not $lettreDisqueSup) { $lettreDisqueSup = "E:" }
+
 $nomServeurWeb = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
 $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
-$nomSiteWeb = Read-Host "Entrez le nom du site web (ex: glpi)"
+$nomSiteWeb = (Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)") 
+if (-not $nomSiteWeb) { $nomSiteWeb = "glpi" }
 
 # $domain est censé contenir le FQDN (ex: "labo.lan")
 
@@ -20,6 +24,7 @@ if ([string]::IsNullOrWhiteSpace($DomainDns) -or
 
 # 2) Conversion FQDN -> DN : "labo.lan" -> "DC=labo,DC=lan"
 $DomainDN = ( $DomainDns -split '\.' | ForEach-Object { "DC=$_" } ) -join ','
+write-Host "Le domaine est $DomainDN"
 
 # 3) Récup éventuelle du NetBIOS et du NC (en forçant le -Server)
 try {
@@ -158,11 +163,11 @@ if ($ipConfig.Dhcp -eq "Disabled") {
 # 9. Vérifier que le suffixe DNS principal correspond au domaine
 $totalPoints++
 $suffixDNS = (Get-DnsClientGlobalSetting).SuffixSearchList | Select-Object -First 1
-if ($suffixDNS -eq $domaine) {
-    Write-Log "[OK] Le suffixe DNS principal correspond au domaine '$domaine'."
+if ($suffixDNS -eq $domain) {
+    Write-Log "[OK] Le suffixe DNS principal correspond au domaine '$domain'."
     $note++
 } else {
-    Write-Log "[ERREUR] Le suffixe DNS principal '$suffixDNS' ne correspond pas au domaine '$domaine'."
+    Write-Log "[ERREUR] Le suffixe DNS principal '$suffixDNS' ne correspond pas au domaine '$domain'."
 }
 
 $totalPoints = $totalPoints + 11
@@ -276,7 +281,7 @@ if ($adRole.Installed) {
         # 18 - Vérification de l'OU racine correspondant au domaine
         Write-Host "Vérification de l'OU racine du domaine..."
         $domainDN = (Get-ADDomain).DistinguishedName
-        $ouRoot = "OU=@labo.lan,$domainDN"
+        $ouRoot = "OU=@$domain,$domainDN"
 
         if (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouRoot'" -ErrorAction SilentlyContinue) {
             Write-log "[OK] L'OU racine '$ouRoot' existe bien." -ForegroundColor Green
