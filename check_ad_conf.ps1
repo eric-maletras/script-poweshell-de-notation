@@ -1,367 +1,353 @@
-# Demande des informations à l'utilisateur
-$nom = Read-Host "Entrez votre nom"
-$prenom = Read-Host "Entrez votre prénom"
-$domain = Read-Host "Entrez le nom du domaine"
-$lettreDisqueSup = Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut)"
-if (-not $lettreDisqueSup) { $lettreDisqueSup = "E:" }
+# =========================
+# En-tête / Inputs
+# =========================
+$Nom            = Read-Host "Entrez votre nom"
+$Prenom         = Read-Host "Entrez votre prénom"
+$Domain         = Read-Host "Entrez le nom du domaine (FQDN ex: labo.lan)"
+$LettreDisqueSup= Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut)"
+if (-not $LettreDisqueSup) { $LettreDisqueSup = "E:" }
 
-$nomServeurWeb = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
-$ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
-$nomSiteWeb = Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)"
-if (-not $nomSiteWeb) { $nomSiteWeb = "glpi" }
+$NomServeurWeb  = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
+$IpServeurWeb   = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
+$NomSiteWeb     = Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)"
+if (-not $NomSiteWeb) { $NomSiteWeb = "glpi" }
 
-# $domain est censé contenir le FQDN (ex: "labo.lan")
-
-# 1) Normalisation FQDN sans utiliser '??'
-$DomainDns = ''
-if ($null -ne $domain) { $DomainDns = [string]$domain }
-$DomainDns = $DomainDns.Trim().TrimEnd('.')
-
-if ([string]::IsNullOrWhiteSpace($DomainDns) -or
-    ($DomainDns -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')) {
-    throw "Le domaine saisi '$domain' n'est pas un FQDN valide (ex: labo.lan)."
+# Normalisation domaine
+$DomainDns = ([string]$Domain).Trim().TrimEnd('.')
+if ([string]::IsNullOrWhiteSpace($DomainDns) -or ($DomainDns -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')) {
+    throw "Le domaine saisi '$Domain' n'est pas un FQDN valide (ex: labo.lan)."
 }
+$DomainDN = ($DomainDns -split '\.' | ForEach-Object { "DC=$_" }) -join ','
 
-# 2) Conversion FQDN -> DN : "labo.lan" -> "DC=labo,DC=lan"
-$DomainDN = ( $DomainDns -split '\.' | ForEach-Object { "DC=$_" } ) -join ','
-write-Host "Le domaine est $DomainDN"
-
-# 3) Récup éventuelle du NetBIOS et du NC (en forçant le -Server)
-try {
-    $ad = Get-ADDomain -Server $DomainDns -ErrorAction Stop
-    $NetBIOS   = $ad.NetBIOSName
-    $DefaultNC = (Get-ADRootDSE -Server $DomainDns -ErrorAction Stop).defaultNamingContext
-
-    if ($ad.DNSRoot -ne $DomainDns) {
-        Write-Host "[AVERTISSEMENT] AD DNSRoot='$($ad.DNSRoot)' ≠ domaine saisi '$DomainDns'."
-    }
-} catch {
-    $NetBIOS   = (($DomainDns -split '\.')[0]).ToUpperInvariant()
-    $DefaultNC = $DomainDN
-}
-
-# Exemple d'utilisation cohérente ensuite :
-# -Server => $DomainDns (FQDN), -SearchBase => $DomainDN ou $DefaultNC
-# Get-ADOrganizationalUnit -Server $DomainDns -SearchBase $DefaultNC -LDAPFilter '(name=Users)'
-# Resolve-DnsName -Name ("_ldap._tcp.dc._msdcs.$DomainDns") -Type SRV -ErrorAction SilentlyContinue
-
-# Initialisation du fichier de log
-$jsonFile = "C:\AD-$($nom)-$($prenom).json"
-
-# Initialisation d'un tableau pour stocker les logs
+# Logs / Score
 $logMessages = @()
-
-function Write-Log {
-    param (
-        [string]$Message
-    )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logEntry = "$timestamp - $Message"
-
-    # Ajouter chaque entrée au tableau des logs
-    $global:logMessages += $logEntry
-
-    # Également afficher la ligne dans la console (utile pour debug)
-    Write-Output $logEntry
-}
-
-
-
-# Vérification des points demandés
 $note = 0
 $totalPoints = 0
 
-Write-Log "Début des vérifications pour le domaine: $domain"
-
-# 1. Vérifier si le rôle DNS est installé
-$totalPoints++
-$dnsInstalled = Get-WindowsFeature -Name "DNS" | Select-Object -ExpandProperty Installed
-if ($dnsInstalled) {
-    Write-Log "[OK] Le rôle DNS est installé."
-    $note++
-} else {
-    Write-Log "[ERREUR] Le rôle DNS n'est pas installé."
+function Write-Log([string]$Message,[string]$Color="Gray"){
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts - $Message"
+    $global:logMessages += $line
+    Write-Host $line -ForegroundColor $Color
 }
 
-# 2. Vérifier si une ZRD principale au nom du domaine existe
-$totalPoints++
-$zrdExist = Get-DnsServerZone | Where-Object { $_.ZoneName -eq $domain -and $_.ZoneType -eq 'Primary' }
-if ($zrdExist) {
-    Write-Log "[OK] La zone de recherche directe (ZRD) '$domain' est créée en principale."
-    $note++
-} else {
-    Write-Log "[ERREUR] La zone de recherche directe (ZRD) '$domain' est absente."
+Write-Log "Début des vérifications pour le domaine: $DomainDns" "Cyan"
+
+# =========================
+# Fonctions de test (retourne $true / $false et écrit dans les logs)
+# =========================
+function Test-DnsRoleInstalled {
+    $ok = (Get-WindowsFeature -Name "DNS").Installed
+    if ($ok) { Write-Log "[OK] Le rôle DNS est installé." "Green" } else { Write-Log "[ERREUR] Le rôle DNS n'est pas installé." "Red" }
+    return $ok
 }
 
-# 3. Vérifier si une ZRI est créée
-$totalPoints++
-$zriExist = Get-DnsServerZone | Where-Object { $_.IsReverseLookupZone -eq $true }
-if ($zriExist) {
-    Write-Log "[OK] Une zone de recherche inverse (ZRI) est créée."
-    $note++
-} else {
-    Write-Log "[ERREUR] Aucune zone de recherche inverse (ZRI) n'est configurée."
+function Test-PrimaryForwardZone {
+    param([string]$ZoneName)
+    $ok = Get-DnsServerZone | Where-Object { $_.ZoneName -eq $ZoneName -and $_.ZoneType -eq 'Primary' }
+    if ($ok){ Write-Log "[OK] La ZRD '$ZoneName' (principale) existe." "Green" } else { Write-Log "[ERREUR] La ZRD '$ZoneName' (principale) est absente." "Red" }
+    return [bool]$ok
 }
 
-# 4. Vérifier si le DNS de la carte réseau est bien configuré
-$totalPoints++
-$localIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Ethernet' }).IPAddress
-$dnsConfig = Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses
-if ($dnsConfig -contains '127.0.0.1' -or $dnsConfig -contains $localIP) {
-    Write-Log "[OK] Le serveur DNS est bien configuré sur 127.0.0.1 ou l'IP du serveur."
-    $note++
-} else {
-    Write-Log "[ERREUR] Le serveur DNS n'est pas configuré correctement."
+function Test-ReverseZoneExists {
+    $ok = Get-DnsServerZone | Where-Object { $_.IsReverseLookupZone -eq $true }
+    if ($ok){ Write-Log "[OK] Une zone de recherche inverse (ZRI) est configurée." "Green" } else { Write-Log "[ERREUR] Aucune ZRI configurée." "Red" }
+    return [bool]$ok
 }
 
-# Vérifier uniquement si la ZRD existe avant d'interroger les records
-$totalPoints++
-$totalPoints++
-if ($zrdExist) {
-    # 5. Vérifier la présence exacte d'un enregistrement A pour le serveur web
-    $recordA = Get-DnsServerResourceRecord -ZoneName $domain -Name $nomServeurWeb -RRType 'A' -ErrorAction SilentlyContinue
-    if ($recordA -and ($recordA.RecordData.IPv4Address.IPAddressToString -eq $ipServeurWeb)) {
-        Write-Log "[OK] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est présent."
-        $note++
-    } else {
-        Write-Log "[ERREUR] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est absent ou incorrect."
+function Test-NicDnsLoopbackOrLocalIP {
+    $localIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Ethernet' }).IPAddress
+    $dnsCfg  = Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses
+    $ok = ($dnsCfg -contains '127.0.0.1' -or $dnsCfg -contains $localIP)
+    if ($ok){ Write-Log "[OK] Le DNS client pointe sur 127.0.0.1 ou l'IP locale." "Green" } else { Write-Log "[ERREUR] Le DNS client n'est pas correctement configuré." "Red" }
+    return $ok
+}
+
+function Test-RecordAExact {
+    param([string]$Zone,[string]$HostName,[string]$Ip)
+    $r = Get-DnsServerResourceRecord -ZoneName $Zone -Name $HostName -RRType 'A' -ErrorAction SilentlyContinue
+    $ok = ($r -and ($r.RecordData.IPv4Address.IPAddressToString -eq $Ip))
+    if ($ok){ Write-Log "[OK] Enregistrement A '$HostName' = $Ip présent." "Green" } else { Write-Log "[ERREUR] Enregistrement A '$HostName' ($Ip) absent/incorrect." "Red" }
+    return $ok
+}
+
+function Test-RecordCnameExact {
+    param([string]$Zone,[string]$Alias,[string]$TargetHost)
+    $r = Get-DnsServerResourceRecord -ZoneName $Zone -Name $Alias -RRType 'CNAME' -ErrorAction SilentlyContinue
+    $expected = "$TargetHost.$Zone."
+    $ok = ($r -and ($r.RecordData.HostNameAlias -eq $expected))
+    if ($ok){ Write-Log "[OK] CNAME '$Alias' -> '$TargetHost' présent." "Green" } else { Write-Log "[ERREUR] CNAME '$Alias' -> '$TargetHost' absent/incorrect." "Red" }
+    return $ok
+}
+
+function Test-Forwarder8888 {
+    $fwds = (Get-DnsServerForwarder).IPAddress.IPAddressToString
+    $ok = ($fwds -contains '8.8.8.8')
+    if ($ok){ Write-Log "[OK] Redirecteur 8.8.8.8 configuré." "Green" } else { Write-Log "[ERREUR] Redirecteur 8.8.8.8 absent." "Red" }
+    return $ok
+}
+
+function Test-StaticIP {
+    $ipCfg = Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Ethernet' }
+    $ok = ($ipCfg.Dhcp -eq "Disabled")
+    if ($ok){ Write-Log "[OK] L'IP est configurée en statique." "Green" } else { Write-Log "[ERREUR] L'IP n'est pas configurée en statique." "Red" }
+    return $ok
+}
+
+function Test-SuffixMatches {
+    param([string]$ExpectedSuffix)
+    $suffix = (Get-DnsClientGlobalSetting).SuffixSearchList | Select-Object -First 1
+    $ok = ($suffix -eq $ExpectedSuffix)
+    if ($ok){ Write-Log "[OK] Suffixe DNS principal = '$ExpectedSuffix'." "Green" } else { Write-Log "[ERREUR] Suffixe DNS '$suffix' ≠ '$ExpectedSuffix'." "Red" }
+    return $ok
+}
+
+# ==== Bloc AD (11 étapes « bonus » max) ====
+function Test-AdRoleInstalled {
+    $ok = (Get-WindowsFeature -Name AD-Domain-Services).Installed
+    if ($ok){ Write-Log "[OK] Rôle AD DS installé." "Green" } else { Write-Log "[ERREUR] Rôle AD DS non installé." "Red" }
+    return $ok
+}
+function Test-IsDomainController {
+    $ok = ((Get-WmiObject Win32_ComputerSystem).DomainRole -eq 5)
+    if ($ok){ Write-Log "[OK] Le serveur est un contrôleur de domaine (DC)." "Green" } else { Write-Log "[ERREUR] Le serveur n'est pas promu en DC." "Yellow" }
+    return $ok
+}
+function Test-NTDSRunning {
+    $svc = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+    $ok = ($svc -and $svc.Status -eq "Running")
+    if ($ok){ Write-Log "[OK] Service NTDS actif." "Green" } else { Write-Log "[ERREUR] Service NTDS inactif." "Red" }
+    return $ok
+}
+function Test-DiscoverDC {
+    $ok = [bool](Get-ADDomainController -Discover -ErrorAction SilentlyContinue)
+    if ($ok){ Write-Log "[OK] Un contrôleur de domaine est détecté." "Green" } else { Write-Log "[ERREUR] Aucun contrôleur de domaine détecté." "Red" }
+    return $ok
+}
+function Test-ADMatchesInput {
+    param([string]$DomainDns)
+    try {
+        $ad = Get-ADDomain -Server $DomainDns -ErrorAction Stop
+        $ok = ($ad.DNSRoot -ieq $DomainDns)
+        if ($ok){ Write-Log "[OK] Domaine AD conforme à l'input : $($ad.DNSRoot)." "Green" } else { Write-Log "[ERREUR] Domaine détecté '$($ad.DNSRoot)' ≠ '$DomainDns'." "Red" }
+        return $ok
+    } catch {
+        Write-Log "[ERREUR] Interrogation du domaine '$DomainDns' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+function Test-Forest {
+    try { $f = Get-ADForest -ErrorAction Stop; Write-Log "[OK] Forêt détectée : $($f.Name)." "Green"; return $true }
+    catch { Write-Log "[ERREUR] Aucune forêt AD détectée." "Red"; return $false }
+}
+function Test-FSMO {
+    try {
+        $fsmo = netdom query fsmo 2>$null | ForEach-Object { $_ -replace "\s+", " " }
+        $ok = [bool]$fsmo
+        if ($ok){ Write-Log "[OK] Rôles FSMO attribués." "Green" } else { Write-Log "[ERREUR] Impossible de récupérer les rôles FSMO." "Red" }
+        return $ok
+    } catch {
+        Write-Log "[ERREUR] netdom indisponible." "Red"; return $false
+    }
+}
+function Test-DomainDnsResolution {
+    try {
+        $dn = (Get-ADDomain).DNSRoot
+        $ok = ($dn -and (Resolve-DnsName -Name $dn -Server 127.0.0.1 -ErrorAction SilentlyContinue))
+        if ($ok){ Write-Log "[OK] Résolution DNS du domaine '$dn' OK." "Green" } else { Write-Log "[ERREUR] Problème de résolution DNS pour '$dn'." "Red" }
+        return [bool]$ok
+    } catch {
+        Write-Log "[ERREUR] Impossible de récupérer le DNSRoot du domaine." "Red"
+        return $false
+    }
+}
+function Test-Replication {
+    try {
+        $rep = repadmin /showrepl 2>$null | Select-String "successfully"
+        $ok = [bool]$rep
+        if ($ok){ Write-Log "[OK] Réplication AD fonctionnelle." "Green" } else { Write-Log "[WARNING] La réplication AD ne semble pas totalement OK." "Yellow" }
+        return $ok
+    } catch {
+        Write-Log "[WARNING] 'repadmin' indisponible." "Yellow"
+        return $false
+    }
+}
+function Test-RootOU {
+    param([string]$DomainDns)
+    $domainDN = (Get-ADDomain).DistinguishedName
+    $ouRoot   = "OU=@$DomainDns,$domainDN"
+    $ok = [bool](Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouRoot'" -ErrorAction SilentlyContinue)
+    if ($ok){ Write-Log "[OK] OU racine '$ouRoot' existe." "Green" } else { Write-Log "[ERREUR] OU racine '$ouRoot' absente." "Red" }
+    return $ok
+}
+function Test-UsersOU {
+    param([string]$DomainDns)
+    $domainDN = (Get-ADDomain).DistinguishedName
+    $ouRoot   = "OU=@$DomainDns,$domainDN"
+    $ouUsers  = "OU=utilisateurs,$ouRoot"
+    $ok = [bool](Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouUsers'" -ErrorAction SilentlyContinue)
+    if ($ok){ Write-Log "[OK] OU 'utilisateurs' existe : $ouUsers" "Green" } else { Write-Log "[ERREUR] OU 'utilisateurs' absente." "Red" }
+    return $ok
+}
+function Test-UsersPresence {
+    param([string]$DomainDns)
+    $domainDN = (Get-ADDomain).DistinguishedName
+    $ouRoot   = "OU=@$DomainDns,$domainDN"
+    $ouUsers  = "OU=utilisateurs,$ouRoot"
+    $count = (Get-ADUser -Filter * -SearchBase "$ouUsers" -ErrorAction SilentlyContinue | Measure-Object).Count
+    $ok = ($count -gt 0)
+    if ($ok){ Write-Log "[OK] $count utilisateur(s) dans l'OU 'utilisateurs'." "Green" } else { Write-Log "[ERREUR] Aucun utilisateur trouvé dans l'OU 'utilisateurs'." "Red" }
+    return $ok
+}
+
+function Test-NtdsSysvolOnDataDrive {
+    param([string]$DataDrive)
+
+    # Normalisation "E:" -> "E:\" et validation
+    if (-not $DataDrive) { Write-Log "[ERREUR] Lettre de lecteur non fournie." "Red"; return $false }
+    $drv = $DataDrive.Trim()
+    if ($drv -notmatch '^[A-Za-z]:$') { Write-Log "[ERREUR] Lettre de lecteur invalide '$DataDrive'." "Red"; return $false }
+    if ($drv -ieq 'C:') { Write-Log "[ERREUR] Le lecteur supplémentaire ne peut pas être C:." "Red"; return $false }
+    $drvRoot = ($drv + "\")
+
+    # Récup des chemins "réels" (Registre), avec fallback si absent
+    $ntdsPath = $null
+    try {
+        $ntdsReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction Stop
+        $ntdsPath = $ntdsReg.'DSA Working Directory'  # ex: E:\Windows\NTDS
+    } catch {}
+    if (-not $ntdsPath) { $ntdsPath = (Join-Path $drvRoot 'Windows\NTDS') }
+
+    $sysvolPath = $null
+    try {
+        $nl = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -ErrorAction Stop
+        $sysvolPath = $nl.'SysVol'  # ex: E:\Windows\SYSVOL
+    } catch {}
+    if (-not $sysvolPath) { $sysvolPath = (Join-Path $drvRoot 'Windows\SYSVOL') }
+
+    # Fonctions utilitaires
+    function Get-Drive([string]$p){ try { return ([System.IO.Path]::GetPathRoot($p)).TrimEnd('\') } catch { return $null } }
+
+    $ntdsDrive   = Get-Drive $ntdsPath
+    $sysvolDrive = Get-Drive $sysvolPath
+
+    $okNtds   = ($ntdsDrive -and ($ntdsDrive -ne 'C:') -and ($ntdsDrive -ieq $drv))
+    $okSysvol = ($sysvolDrive -and ($sysvolDrive -ne 'C:') -and ($sysvolDrive -ieq $drv))
+
+    # Existence des dossiers (avertissement si manquants)
+    if ($okNtds -and -not (Test-Path $ntdsPath))   { Write-Log "[WARNING] Dossier NTDS introuvable : $ntdsPath." "Yellow" }
+    if ($okSysvol -and -not (Test-Path $sysvolPath)) { Write-Log "[WARNING] Dossier SYSVOL introuvable : $sysvolPath." "Yellow" }
+
+    if ($okNtds -and $okSysvol) {
+        Write-Log "[OK] NTDS et SYSVOL sont sur $drv (hors C:) : NTDS='$ntdsPath', SYSVOL='$sysvolPath'." "Green"
+        return $true
     }
 
-    # 6. Vérifier la présence exacte d'un enregistrement CNAME pour le site web
-    $recordCNAME = Get-DnsServerResourceRecord -ZoneName $domain -Name $nomSiteWeb -RRType 'CNAME' -ErrorAction SilentlyContinue
-    if ($recordCNAME -and ($recordCNAME.RecordData.HostNameAlias -eq "$nomServeurWeb.$domain.")) {
-        Write-Log "[OK] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est présent."
-        $note++
-    } else {
-        Write-Log "[ERREUR] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est absent ou incorrect."
-    }
-} else {
-    Write-Log "[ERREUR] Les vérifications des enregistrements DNS sont ignorées car la zone '$domain' est absente."
-}
-
-# 7. Vérifier la présence d'un redirecteur (8.8.8.8)
-$totalPoints++
-$redirectors = (Get-DnsServerForwarder).IPAddress.IPAddressToString
-if ($redirectors -contains '8.8.8.8') {
-    Write-Log "[OK] Le redirecteur vers 8.8.8.8 est configuré."
-    $note++
-} else {
-    Write-Log "[ERREUR] Le redirecteur vers 8.8.8.8 est absent."
-}
-
-# 8. Vérifier que l'IP est configurée en statique
-$totalPoints++
-$ipConfig = Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Ethernet' }
-if ($ipConfig.Dhcp -eq "Disabled") {
-    Write-Log "[OK] L'IP du serveur est configurée en statique."
-    $note++
-} else {
-    Write-Log "[ERREUR] L'IP du serveur n'est pas configurée en statique."
+    if (-not $okNtds)   { Write-Log "[ERREUR] NTDS sur '$ntdsPath' – attendu sur $drv* (≠ C:)." "Red" }
+    if (-not $okSysvol) { Write-Log "[ERREUR] SYSVOL sur '$sysvolPath' – attendu sur $drv* (≠ C:)." "Red" }
+    return $false
 }
 
 
-# 9. Vérifier que le suffixe DNS principal correspond au domaine
-$totalPoints++
-$suffixDNS = (Get-DnsClientGlobalSetting).SuffixSearchList | Select-Object -First 1
-if ($suffixDNS -eq $domain) {
-    Write-Log "[OK] Le suffixe DNS principal correspond au domaine '$domain'."
-    $note++
-} else {
-    Write-Log "[ERREUR] Le suffixe DNS principal '$suffixDNS' ne correspond pas au domaine '$domain'."
-}
+# =========================
+# Lancement séquentiel des fonctions (DNS / réseau)
+# =========================
+$totalPoints++; if (Test-DnsRoleInstalled)             { $note++ }
+$totalPoints++; if (Test-PrimaryForwardZone $DomainDns){ $note++ }
+$totalPoints++; if (Test-ReverseZoneExists)            { $note++ }
+$totalPoints++; if (Test-NicDnsLoopbackOrLocalIP)      { $note++ }
 
+# Enregistrements A / CNAME (on compte dans tous les cas comme dans ton script)
+$zrdExist = Get-DnsServerZone | Where-Object { $_.ZoneName -eq $DomainDns -and $_.ZoneType -eq 'Primary' }
+$totalPoints++;
+if ($zrdExist){ if (Test-RecordAExact -Zone $DomainDns -HostName $NomServeurWeb -Ip $IpServeurWeb) { $note++ } }
+else { Write-Log "[ERREUR] Vérification A ignorée (ZRD '$DomainDns' absente)." "Yellow" }
+
+$totalPoints++;
+if ($zrdExist){ if (Test-RecordCnameExact -Zone $DomainDns -Alias $NomSiteWeb -TargetHost $NomServeurWeb) { $note++ } }
+else { Write-Log "[ERREUR] Vérification CNAME ignorée (ZRD '$DomainDns' absente)." "Yellow" }
+
+$totalPoints++; if (Test-Forwarder8888)                { $note++ }
+$totalPoints++; if (Test-StaticIP)                     { $note++ }
+$totalPoints++; if (Test-SuffixMatches $DomainDns)     { $note++ }
+
+# =========================
+# Gestion du barème : +11 au dénominateur (comme ton script)
+# =========================
 $totalPoints = $totalPoints + 11
-# 10 - Vérification de l'installation du rôle AD DS
-# Write-Host "Vérification de la présence du rôle Active Directory Domain Services..."
-$adRole = Get-WindowsFeature -Name AD-Domain-Services
+# Et « récupération » progressive : 1 point bonus par étape AD réussie (max 11)
+$adBonusLeft = 11
 
-if ($adRole.Installed) {
-    Write-Log "[OK] Le rôle AD DS est installé." -ForegroundColor Green
-    $note++
-
-    # Vérification si la machine est un contrôleur de domaine (DC)
-    $domainRole = (Get-WmiObject Win32_ComputerSystem).DomainRole
-    if ($domainRole -eq 5) {
-        Write-Log "[OK] Le serveur est promu en contrôleur de domaine." -ForegroundColor Green
-        $note++
-
-        # 11 - Vérification du service AD DS
-        Write-Host "Vérification du service NTDS..."
-        if ((Get-Service -Name NTDS -ErrorAction SilentlyContinue).Status -eq "Running") {
-            Write-Log "[OK] Le service NTDS est actif." -ForegroundColor Green
-            $note++
-        } else {
-            Write-Log "[ERREUR] Le service NTDS n'est PAS actif !" -ForegroundColor Red
+# =========================
+# Lancement séquentiel des fonctions (AD)
+# =========================
+function Add-PointIfOk($ok){
+    if ($ok){
+        $script:note++                   # point du test lui-même
+        if ($script:adBonusLeft -gt 0){  # +1 pour « récupérer » 1/11
+            $script:note++
+            $script:adBonusLeft--
         }
-
-        # 12 - Vérification du contrôleur de domaine
-        Write-Host "Vérification de la présence d'un contrôleur de domaine..."
-        if (Get-ADDomainController -Discover -ErrorAction SilentlyContinue) {
-            Write-Log "[OK] Un contrôleur de domaine a été détecté." -ForegroundColor Green
-            $note++
-        } else {
-            Write-Log "[ERREUR] Aucun contrôleur de domaine trouvé !" -ForegroundColor Red
-        }
-
-        # On part du FQDN saisi dans $DomainDns (ex: "labo.lan")
-        # Si tu n'as pas cette variable plus haut, ajoute :
-        # $DomainDns = ([string]$domain).Trim().TrimEnd('.')
-
-        # 13 - Vérification du domaine AD (aligné sur l'input)
-        Write-Host "Vérification du domaine AD..."
-        try {
-          # Interroge **ce** domaine
-          $ad = Get-ADDomain -Server $DomainDns -ErrorAction Stop
-
-          if ($ad.DNSRoot -ieq $DomainDns) {
-            Write-Log "[OK] Domaine AD détecté et conforme à l'input : $($ad.DNSRoot)" -ForegroundColor Green
-            $note++
-          } else {
-            Write-Log "[ERREUR] Le domaine AD détecté '$($ad.DNSRoot)' ne correspond pas au domaine saisi '$DomainDns'." -ForegroundColor Red
-         }
-        } catch {
-         Write-Log "[ERREUR] Impossible d'interroger le domaine '$DomainDns' : $($_.Exception.Message)" -ForegroundColor Red
-        }
-
-
-        # 14 - Vérification de la forêt AD
-        Write-Host "Vérification de la forêt AD..."
-        try {
-            $forest = Get-ADForest -ErrorAction Stop
-            Write-log "[OK] Forêt détectée : $($forest.Name)" -ForegroundColor Green
-            $note++
-        } catch {
-            Write-Log "[ERREUR] Aucune forêt AD trouvée !" -ForegroundColor Red
-        }
-
-        # 15 - Vérification des rôles FSMO
-        Write-Host "Vérification des rôles FSMO..."
-        try {
-            $fsmoRoles = netdom query fsmo 2>$null | ForEach-Object { $_ -replace "\s+", " " }  # Supprime les espaces multiples
-            if ($fsmoRoles) {
-                Write-Log "[OK] Tous les rôles FSMO sont bien attribués." -ForegroundColor Green
-                $note++
-            } else {
-                Write-Log "[ERREUR] Impossible de récupérer les rôles FSMO !" -ForegroundColor Red
-            }
-        } catch {
-            Write-log "Erreur lors de la récupération des rôles FSMO !" -ForegroundColor Red
-        }
-
-
-        # 16 - Vérification de la résolution DNS du domaine
-        Write-Host "Vérification de la résolution DNS..."
-        try {
-            $domainName = (Get-ADDomain).DNSRoot
-            if ($domainName -and (Resolve-DnsName -Name $domainName -Server 127.0.0.1 -ErrorAction SilentlyContinue)) {
-                Write-Log "[OK] La résolution DNS du domaine '$domainName' est correcte." -ForegroundColor Green
-                $note++
-            } else {
-                Write-Log "[ERREUR] Problème de résolution DNS pour $domainName !" -ForegroundColor Red
-            }
-        } catch {
-            Write-Log "[ERREUR] Impossible de récupérer le DNS du domaine." -ForegroundColor Red
-        }
-
-
-        # 17 - Vérification de la réplication AD
-        Write-Host "Vérification de la réplication AD..."
-        try {
-            $replicationStatus = repadmin /showrepl 2>$null | Select-String "successfully"  # Filtrer uniquement les lignes pertinentes
-            if ($replicationStatus) {
-                Write-log "[OK] La réplication AD est fonctionnelle." -ForegroundColor Green
-                $note++
-            } else {
-                Write-log "[WARNING] Attention : La réplication AD ne semble pas totalement fonctionnelle." -ForegroundColor Yellow
-            }
-        } catch {
-            Write-log "[WARNING] Impossible d'exécuter 'repadmin', l'outil n'est peut-être pas disponible." -ForegroundColor Red
-        }
-
-        # 18 - Vérification de l'OU racine correspondant au domaine
-        Write-Host "Vérification de l'OU racine du domaine..."
-        $domainDN = (Get-ADDomain).DistinguishedName
-        $ouRoot = "OU=@$domain,$domainDN"
-
-        if (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouRoot'" -ErrorAction SilentlyContinue) {
-            Write-log "[OK] L'OU racine '$ouRoot' existe bien." -ForegroundColor Green
-            $note++
-        } else {
-            Write-log "[ERREUR] L'OU racine n'existe pas !" -ForegroundColor Red
-        }
-
-        # 19 - Vérification de l'OU "Utilisateurs" sous l'OU racine
-        Write-Host "Vérification de l'OU 'Utilisateurs' sous l'OU racine..."
-        $ouUsers = "OU=utilisateurs,$ouRoot"
-        
-        if (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouUsers'" -ErrorAction SilentlyContinue) {
-            Write-Log "[OK] L'OU 'Utilisateurs' existe : $ouUsers" -ForegroundColor Green
-            $note++
-        } else {
-            Write-Log "[ERREUR] L'OU 'Utilisateurs' n'existe pas !" -ForegroundColor Red
-        }
-
-        # 20 - Vérification de la présence d'au moins un utilisateur dans l'OU "Utilisateurs"
-        Write-Host "Vérification de la présence d'au moins un utilisateur dans l'OU 'Utilisateurs'..."
-        $usersCount = (Get-ADUser -Filter * -SearchBase "$ouUsers" -ErrorAction SilentlyContinue | Measure-Object).Count
-
-        if ($usersCount -gt 0) {
-            Write-log "[OK] Nombre d'utilisateurs trouvés dans l'OU 'Utilisateurs' : $usersCount" -ForegroundColor Green
-            $note++
-        } else {
-            Write-log "[ERREUR] Aucun utilisateur trouvé dans l'OU 'Utilisateurs' !" -ForegroundColor Red
-        }
-
-    } else {
-        Write-Log "[ERREUR] Le rôle AD DS est installé mais la machine n'est PAS promue en contrôleur de domaine. Aucun test AD ne sera effectué." -ForegroundColor Yellow
     }
-
-} else {
-    Write-Log "[ERREUR] Le rôle Active Directory Domain Services n'est PAS installé. Aucun test AD ne sera effectué." -ForegroundColor Red
 }
 
+$totalPoints++; $t = Test-AdRoleInstalled              ; Add-PointIfOk $t
+$totalPoints++; $t = Test-IsDomainController           ; Add-PointIfOk $t
+$totalPoints++; $t = Test-NTDSRunning                  ; Add-PointIfOk $t
+$totalPoints++; $t = Test-DiscoverDC                   ; Add-PointIfOk $t
+$totalPoints++; $t = Test-ADMatchesInput $DomainDns    ; Add-PointIfOk $t
+$totalPoints++; $t = Test-Forest                       ; Add-PointIfOk $t
+$totalPoints++; $t = Test-FSMO                         ; Add-PointIfOk $t
+$totalPoints++; $t = Test-DomainDnsResolution          ; Add-PointIfOk $t
+#$totalPoints++; $t = Test-Replication                 ; Add-PointIfOk $t
+$totalPoints++; $t = Test-RootOU $DomainDns            ; Add-PointIfOk $t
+$totalPoints++; $t = Test-UsersOU $DomainDns           ; Add-PointIfOk $t
+$totalPoints++; $t = Test-UsersPresence $DomainDns     ; Add-PointIfOk $t
+$totalPoints++; $t = Test-NtdsSysvolOnDataDrive -DataDrive $LettreDisqueSup ; Add-PointIfOk $t
 
 
-# Calcul de la note
-#$finalNote = [math]::Round(($note / $totalPoints) * 20, 1)
+# =========================
+# Calcul / JSON / Affichage / Envoi
+# =========================
+function Show-And-Send-Result {
+    param(
+        [string]$Nom,[string]$Prenom,[int]$Note,[int]$Total,[array]$Logs,[string]$DomainDns
+    )
+    $scoreSur20 = if ($Total -gt 0) { [math]::Round(($Note / $Total) * 20, 2) } else { 0 }
+    $pourcentage = if ($Total -gt 0) { [math]::Round(100 * $Note / $Total, 1) } else { 0 }
 
-# Calcul de la note sur 20
-$scoreSur20 = if ($totalPoints -gt 0) { [math]::Round(($note / $totalPoints) * 20, 2) } else { 0 }
+    $jsonFile = "C:\AD-$($Nom)-$($Prenom).json"
+    $payload = [ordered]@{
+        status       = "OK"
+        timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        nom          = $Nom
+        prenom       = $Prenom
+        domaine      = $DomainDns
+        score        = $Note
+        total        = $Total
+        note         = $scoreSur20
+        commentaires = ($Logs -join "`n")
+    } | ConvertTo-Json -Depth 4
 
-# Transformation de la liste en une seule chaîne avec sauts de ligne
-$logDetails = $logMessages -join "`n"
+    $payload | Set-Content -Path $jsonFile -Encoding UTF8
+    Write-Host "✅ Fichier JSON généré : $jsonFile" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "──────── Résultat ────────" -ForegroundColor Cyan
+    Write-Host ("Points : {0} / {1}" -f $Note, $Total) -ForegroundColor Cyan
+    Write-Host ("Note   : {0} / 20  ( {1}% )" -f $scoreSur20, $pourcentage) -ForegroundColor Cyan
+    Write-Host "──────────────────────────" -ForegroundColor Cyan
 
-# Génération du JSON
-$jsonData = @{
-    "status"    = "OK"
-    "timestamp" = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    "nom"       = $nom
-    "prenom"    = $prenom
-    "score"     = $note
-    "total"     = $totalPoints
-    "note"      = if ($totalPoints -gt 0) { [math]::Round(($note / $totalPoints) * 20, 2) } else { 0 }
-    "commentaires"   = $logDetails  # ✅ Ici, on force le format avec des \n
-} | ConvertTo-Json -Depth 3
-
-
-# Sauvegarde du fichier JSON
-$jsonData | Set-Content -Path $jsonFile -Encoding UTF8
-
-Write-Output "✅ Fichier JSON généré : $jsonFile"
-
-# ---- Envoi du fichier JSON vers logreceiver.php ----
-
-# URL du serveur PHP qui reçoit les données
-$serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=AD-$($nom)-$($prenom).json"
-
-# Envoi via une requête POST
-try {
-    Invoke-RestMethod -Uri $serverUrl -Method Post -Body $jsonData -ContentType "application/json; charset=utf-8"
-    Write-Output "✅ Fichier JSON envoyé avec succès !"
-} catch {
-    Write-Output "❌ Erreur lors de l'envoi du fichier JSON : $_"
+    # Envoi optionnel vers logreceiver.php (même URL que ton script)
+    $serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=AD-$($Nom)-$($Prenom).json"
+    try {
+        Invoke-RestMethod -Uri $serverUrl -Method Post -Body $payload -ContentType "application/json; charset=utf-8"
+        Write-Host "✅ Fichier JSON envoyé avec succès !" -ForegroundColor Green
+    } catch {
+        Write-Host "❌ Erreur lors de l'envoi du fichier JSON : $($_.Exception.Message)" -ForegroundColor Red
+    }
 }
 
+Show-And-Send-Result -Nom $Nom -Prenom $Prenom -Note $note -Total $totalPoints -Logs $logMessages -DomainDns $DomainDns
 
-# Attendre avant de fermer
-Read-Host -Prompt "Appuyez sur Entrée pour quitter"
+# Pause (si tu veux)
+# Read-Host -Prompt "Appuyez sur Entrée pour quitter"
