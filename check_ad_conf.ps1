@@ -2,12 +2,12 @@
 $nom = Read-Host "Entrez votre nom"
 $prenom = Read-Host "Entrez votre prénom"
 $domain = Read-Host "Entrez le nom du domaine"
-$lettreDisqueSup = Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut) 
+$lettreDisqueSup = Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut)"
 if (-not $lettreDisqueSup) { $lettreDisqueSup = "E:" }
 
 $nomServeurWeb = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
 $ipServeurWeb = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
-$nomSiteWeb = (Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)") 
+$nomSiteWeb = Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)"
 if (-not $nomSiteWeb) { $nomSiteWeb = "glpi" }
 
 # $domain est censé contenir le FQDN (ex: "labo.lan")
@@ -71,7 +71,7 @@ function Write-Log {
 $note = 0
 $totalPoints = 0
 
-Write-Log "Début des vérifications pour le domaine: $domaine"
+Write-Log "Début des vérifications pour le domaine: $domain"
 
 # 1. Vérifier si le rôle DNS est installé
 $totalPoints++
@@ -85,12 +85,12 @@ if ($dnsInstalled) {
 
 # 2. Vérifier si une ZRD principale au nom du domaine existe
 $totalPoints++
-$zrdExist = Get-DnsServerZone | Where-Object { $_.ZoneName -eq $domaine -and $_.ZoneType -eq 'Primary' }
+$zrdExist = Get-DnsServerZone | Where-Object { $_.ZoneName -eq $domain -and $_.ZoneType -eq 'Primary' }
 if ($zrdExist) {
-    Write-Log "[OK] La zone de recherche directe (ZRD) '$domaine' est créée en principale."
+    Write-Log "[OK] La zone de recherche directe (ZRD) '$domain' est créée en principale."
     $note++
 } else {
-    Write-Log "[ERREUR] La zone de recherche directe (ZRD) '$domaine' est absente."
+    Write-Log "[ERREUR] La zone de recherche directe (ZRD) '$domain' est absente."
 }
 
 # 3. Vérifier si une ZRI est créée
@@ -119,7 +119,7 @@ $totalPoints++
 $totalPoints++
 if ($zrdExist) {
     # 5. Vérifier la présence exacte d'un enregistrement A pour le serveur web
-    $recordA = Get-DnsServerResourceRecord -ZoneName $domaine -Name $nomServeurWeb -RRType 'A' -ErrorAction SilentlyContinue
+    $recordA = Get-DnsServerResourceRecord -ZoneName $domain -Name $nomServeurWeb -RRType 'A' -ErrorAction SilentlyContinue
     if ($recordA -and ($recordA.RecordData.IPv4Address.IPAddressToString -eq $ipServeurWeb)) {
         Write-Log "[OK] L'enregistrement A '$nomServeurWeb' ($ipServeurWeb) est présent."
         $note++
@@ -128,15 +128,15 @@ if ($zrdExist) {
     }
 
     # 6. Vérifier la présence exacte d'un enregistrement CNAME pour le site web
-    $recordCNAME = Get-DnsServerResourceRecord -ZoneName $domaine -Name $nomSiteWeb -RRType 'CNAME' -ErrorAction SilentlyContinue
-    if ($recordCNAME -and ($recordCNAME.RecordData.HostNameAlias -eq "$nomServeurWeb.$domaine.")) {
+    $recordCNAME = Get-DnsServerResourceRecord -ZoneName $domain -Name $nomSiteWeb -RRType 'CNAME' -ErrorAction SilentlyContinue
+    if ($recordCNAME -and ($recordCNAME.RecordData.HostNameAlias -eq "$nomServeurWeb.$domain.")) {
         Write-Log "[OK] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est présent."
         $note++
     } else {
         Write-Log "[ERREUR] L'enregistrement CNAME '$nomSiteWeb' pointant sur '$nomServeurWeb' est absent ou incorrect."
     }
 } else {
-    Write-Log "[ERREUR] Les vérifications des enregistrements DNS sont ignorées car la zone '$domaine' est absente."
+    Write-Log "[ERREUR] Les vérifications des enregistrements DNS sont ignorées car la zone '$domain' est absente."
 }
 
 # 7. Vérifier la présence d'un redirecteur (8.8.8.8)
