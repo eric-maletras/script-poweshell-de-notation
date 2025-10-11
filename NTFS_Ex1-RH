@@ -1,0 +1,511 @@
+# =========================
+# Script de correction - Exercice 1 : Service RH
+# Gestion NTFS avec héritage (bonne pratique Microsoft)
+# =========================
+
+# =========================
+# En-tête / Inputs
+# =========================
+$Nom            = Read-Host "Entrez votre nom"
+$Prenom         = Read-Host "Entrez votre prénom"
+$Domain         = Read-Host "Entrez le nom du domaine (FQDN ex: labo.lan)"
+$LettreDisqueSup= Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut)"
+if (-not $LettreDisqueSup) { $LettreDisqueSup = "E:" }
+
+#$NomServeurWeb  = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
+#$IpServeurWeb   = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
+#$NomSiteWeb     = Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)"
+#if (-not $NomSiteWeb) { $NomSiteWeb = "glpi" }
+
+# Normalisation domaine
+$DomainDns = ([string]$Domain).Trim().TrimEnd('.')
+if ([string]::IsNullOrWhiteSpace($DomainDns) -or ($DomainDns -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')) {
+    throw "Le domaine saisi '$Domain' n'est pas un FQDN valide (ex: labo.lan)."
+}
+$DomainDN = ($DomainDns -split '\.' | ForEach-Object { "DC=$_" }) -join ','
+
+# Variables spécifiques à l'exercice
+$OURacine = "OU=@$DomainDns,$DomainDN"
+$OUGroupes = "OU=groupes,$OURacine"
+$OUUtilisateurs = "OU=utilisateurs,$OURacine"
+$CheminPartages = "${LettreDisqueSup}\Partages\RH"
+
+# Logs / Score
+$logMessages = @()
+$note = 0
+$totalPoints = 0
+
+function Write-Log([string]$Message,[string]$Color="Gray"){
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts - $Message"
+    $global:logMessages += $line
+    Write-Host $line -ForegroundColor $Color
+}
+
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+Write-Log "Correction Exercice 1 : Service RH" "Cyan"
+Write-Log "Domaine: $DomainDns" "Cyan"
+Write-Log "Étudiant: $Prenom $Nom" "Cyan"
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+
+# =========================
+# Fonctions de test
+# =========================
+
+function Test-StaticIP {
+    $ipCfg = Get-NetIPInterface -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -match 'Ethernet' }
+    $ok = ($ipCfg.Dhcp -eq "Disabled")
+    if ($ok){ Write-Log "[OK] L'IP est configurée en statique." "Green" } else { Write-Log "[ERREUR] L'IP n'est pas configurée en statique." "Red" }
+    return $ok
+}
+
+function Test-SuffixMatches {
+    param([string]$ExpectedSuffix)
+    $suffix = (Get-DnsClientGlobalSetting).SuffixSearchList | Select-Object -First 1
+    $ok = ($suffix -eq $ExpectedSuffix)
+    if ($ok){ Write-Log "[OK] Suffixe DNS principal = '$ExpectedSuffix'." "Green" } else { Write-Log "[ERREUR] Suffixe DNS '$suffix' ≠ '$ExpectedSuffix'." "Red" }
+    return $ok
+}
+function Test-AdRoleInstalled {
+    $ok = (Get-WindowsFeature -Name AD-Domain-Services).Installed
+    if ($ok){ Write-Log "[OK] Rôle AD DS installé." "Green" } else { Write-Log "[ERREUR] Rôle AD DS non installé." "Red" }
+    return $ok
+}
+function Test-IsDomainController {
+    $ok = ((Get-WmiObject Win32_ComputerSystem).DomainRole -eq 5)
+    if ($ok){ Write-Log "[OK] Le serveur est un contrôleur de domaine (DC)." "Green" } else { Write-Log "[ERREUR] Le serveur n'est pas promu en DC." "Yellow" }
+    return $ok
+}
+function Test-NTDSRunning {
+    $svc = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+    $ok = ($svc -and $svc.Status -eq "Running")
+    if ($ok){ Write-Log "[OK] Service NTDS actif." "Green" } else { Write-Log "[ERREUR] Service NTDS inactif." "Red" }
+    return $ok
+}
+function Test-DiscoverDC {
+    $ok = [bool](Get-ADDomainController -Discover -ErrorAction SilentlyContinue)
+    if ($ok){ Write-Log "[OK] Un contrôleur de domaine est détecté." "Green" } else { Write-Log "[ERREUR] Aucun contrôleur de domaine détecté." "Red" }
+    return $ok
+}
+function Test-ADMatchesInput {
+    param([string]$DomainDns)
+    try {
+        $ad = Get-ADDomain -Server $DomainDns -ErrorAction Stop
+        $ok = ($ad.DNSRoot -ieq $DomainDns)
+        if ($ok){ Write-Log "[OK] Domaine AD conforme à l'input : $($ad.DNSRoot)." "Green" } else { Write-Log "[ERREUR] Domaine détecté '$($ad.DNSRoot)' ≠ '$DomainDns'." "Red" }
+        return $ok
+    } catch {
+        Write-Log "[ERREUR] Interrogation du domaine '$DomainDns' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+function Test-Forest {
+    try { $f = Get-ADForest -ErrorAction Stop; Write-Log "[OK] Forêt détectée : $($f.Name)." "Green"; return $true }
+    catch { Write-Log "[ERREUR] Aucune forêt AD détectée." "Red"; return $false }
+}
+function Test-FSMO {
+    try {
+        $fsmo = netdom query fsmo 2>$null | ForEach-Object { $_ -replace "\s+", " " }
+        $ok = [bool]$fsmo
+        if ($ok){ Write-Log "[OK] Rôles FSMO attribués." "Green" } else { Write-Log "[ERREUR] Impossible de récupérer les rôles FSMO." "Red" }
+        return $ok
+    } catch {
+        Write-Log "[ERREUR] netdom indisponible." "Red"; return $false
+    }
+}
+function Test-DomainDnsResolution {
+    try {
+        $dn = (Get-ADDomain).DNSRoot
+        $ok = ($dn -and (Resolve-DnsName -Name $dn -Server 127.0.0.1 -ErrorAction SilentlyContinue))
+        if ($ok){ Write-Log "[OK] Résolution DNS du domaine '$dn' OK." "Green" } else { Write-Log "[ERREUR] Problème de résolution DNS pour '$dn'." "Red" }
+        return [bool]$ok
+    } catch {
+        Write-Log "[ERREUR] Impossible de récupérer le DNSRoot du domaine." "Red"
+        return $false
+    }
+}
+
+######################################################
+
+function Test-OUExists {
+    param([string]$OUPath, [string]$Description)
+    $ok = [bool](Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUPath'" -ErrorAction SilentlyContinue)
+    if ($ok) { 
+        Write-Log "[OK] OU '$Description' existe : $OUPath" "Green" 
+    } else { 
+        Write-Log "[ERREUR] OU '$Description' absente : $OUPath" "Red" 
+    }
+    return $ok
+}
+
+function Test-GroupExists {
+    param([string]$GroupName, [string]$Scope, [string]$Category, [string]$OUPath)
+    $group = Get-ADGroup -Filter "Name -eq '$GroupName'" -SearchBase $OUPath -Properties GroupScope,GroupCategory -ErrorAction SilentlyContinue
+    
+    if (-not $group) {
+        Write-Log "[ERREUR] Groupe '$GroupName' absent dans $OUPath" "Red"
+        return $false
+    }
+    
+    $scopeOk = ($group.GroupScope -eq $Scope)
+    $catOk = ($group.GroupCategory -eq $Category)
+    
+    if ($scopeOk -and $catOk) {
+        Write-Log "[OK] Groupe '$GroupName' ($Scope, $Category) existe" "Green"
+        return $true
+    } else {
+        Write-Log "[ERREUR] Groupe '$GroupName' : Scope=$($group.GroupScope) (attendu $Scope), Category=$($group.GroupCategory) (attendu $Category)" "Red"
+        return $false
+    }
+}
+
+function Test-UserExists {
+    param([string]$Login, [string]$FullName, [string]$OUPath)
+    $user = Get-ADUser -Filter "SamAccountName -eq '$Login'" -SearchBase $OUPath -Properties DisplayName -ErrorAction SilentlyContinue
+    
+    if (-not $user) {
+        Write-Log "[ERREUR] Utilisateur '$Login' absent dans $OUPath" "Red"
+        return $false
+    }
+    
+    Write-Log "[OK] Utilisateur '$Login' ($($user.DisplayName)) existe" "Green"
+    return $true
+}
+
+function Test-UserInGroup {
+    param([string]$Login, [string]$GroupName)
+    $user = Get-ADUser -Filter "SamAccountName -eq '$Login'" -ErrorAction SilentlyContinue
+    if (-not $user) {
+        Write-Log "[ERREUR] Utilisateur '$Login' introuvable pour test d'appartenance" "Red"
+        return $false
+    }
+    
+    $isMember = Get-ADGroupMember -Identity $GroupName -ErrorAction SilentlyContinue | Where-Object { $_.SamAccountName -eq $Login }
+    
+    if ($isMember) {
+        Write-Log "[OK] '$Login' est membre de '$GroupName'" "Green"
+        return $true
+    } else {
+        Write-Log "[ERREUR] '$Login' n'est PAS membre de '$GroupName'" "Red"
+        return $false
+    }
+}
+
+function Test-GroupInGroup {
+    param([string]$MemberGroup, [string]$ParentGroup)
+    $member = Get-ADGroup -Filter "Name -eq '$MemberGroup'" -ErrorAction SilentlyContinue
+    if (-not $member) {
+        Write-Log "[ERREUR] Groupe membre '$MemberGroup' introuvable" "Red"
+        return $false
+    }
+    
+    $isMember = Get-ADGroupMember -Identity $ParentGroup -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $MemberGroup }
+    
+    if ($isMember) {
+        Write-Log "[OK] Groupe '$MemberGroup' est membre de '$ParentGroup'" "Green"
+        return $true
+    } else {
+        Write-Log "[ERREUR] Groupe '$MemberGroup' n'est PAS membre de '$ParentGroup'" "Red"
+        return $false
+    }
+}
+
+function Test-FolderExists {
+    param([string]$Path)
+    $ok = Test-Path -Path $Path -PathType Container
+    if ($ok) {
+        Write-Log "[OK] Dossier existe : $Path" "Green"
+    } else {
+        Write-Log "[ERREUR] Dossier absent : $Path" "Red"
+    }
+    return $ok
+}
+
+function Test-ShareExists {
+    param([string]$ShareName, [string]$Path)
+    $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
+    
+    if (-not $share) {
+        Write-Log "[ERREUR] Partage '$ShareName' inexistant" "Red"
+        return $false
+    }
+    
+    if ($share.Path -ne $Path) {
+        Write-Log "[ERREUR] Partage '$ShareName' pointe vers '$($share.Path)' au lieu de '$Path'" "Red"
+        return $false
+    }
+    
+    Write-Log "[OK] Partage '$ShareName' existe et pointe vers '$Path'" "Green"
+    return $true
+}
+
+function Test-SharePermission {
+    param([string]$ShareName, [string]$Identity, [string]$AccessRight)
+    
+    $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
+    if (-not $share) {
+        Write-Log "[ERREUR] Partage '$ShareName' inexistant pour test permissions" "Red"
+        return $false
+    }
+    
+    $permissions = Get-SmbShareAccess -Name $ShareName -ErrorAction SilentlyContinue
+    $permission = $permissions | Where-Object { $_.AccountName -like "*$Identity" -and $_.AccessRight -eq $AccessRight }
+    
+    if ($permission) {
+        Write-Log "[OK] Permission de partage '$AccessRight' pour '$Identity' sur '$ShareName'" "Green"
+        return $true
+    } else {
+        Write-Log "[ERREUR] Permission de partage '$AccessRight' pour '$Identity' absente sur '$ShareName'" "Red"
+        return $false
+    }
+}
+
+function Test-NTFSPermission {
+    param(
+        [string]$Path,
+        [string]$Identity,
+        [string]$Rights,
+        [string]$Type = "Allow"
+    )
+    
+    if (-not (Test-Path $Path)) {
+        Write-Log "[ERREUR] Chemin '$Path' inexistant pour test NTFS" "Red"
+        return $false
+    }
+    
+    $acl = Get-Acl -Path $Path
+    
+    # Recherche de la permission (en tenant compte du domaine)
+    $permission = $acl.Access | Where-Object {
+        ($_.IdentityReference -like "*\$Identity" -or $_.IdentityReference -eq $Identity) -and
+        $_.FileSystemRights -match $Rights -and
+        $_.AccessControlType -eq $Type -and
+        $_.IsInherited -eq $false  # Permission explicite (non héritée)
+    }
+    
+    if ($permission) {
+        Write-Log "[OK] Permission explicite '$Rights' ($Type) pour '$Identity' sur '$Path'" "Green"
+        return $true
+    } else {
+        Write-Log "[ERREUR] Permission explicite '$Rights' ($Type) pour '$Identity' absente sur '$Path'" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Tests de la structure AD
+# =========================
+
+Write-Log "`n──── Vérification structure AD ────" "Yellow"
+
+$totalPoints++; if (Test-StaticIP)                     { $note++ }
+$totalPoints++; if (Test-SuffixMatches $DomainDns)     { $note++ }
+$totalPoints++; if (Test-AdRoleInstalled)              { $note++ }
+$totalPoints++; if (Test-IsDomainController )           { $note++ }
+$totalPoints++; if (Test-NTDSRunning )           { $note++ }
+$totalPoints++; if (Test-DiscoverDC)           { $note++ }
+$totalPoints++; if (Test-ADMatchesInput $DomainDns)           { $note++ }
+$totalPoints++; if (Test-Forest)           { $note++ }
+$totalPoints++; if (Test-FSMO)           { $note++ }
+$totalPoints++; if (Test-DomainDnsResolution)           { $note++ }
+
+
+
+$totalPoints += 2
+$passedTests = 0
+if (Test-OUExists -OUPath $OURacine -Description "OU Racine @$DomainDns") { $passedTests++ }
+if (Test-OUExists -OUPath $OUGroupes -Description "OU Groupes") { $passedTests++ }
+if (Test-OUExists -OUPath $OUUtilisateurs -Description "OU Utilisateurs") { $passedTests++ }
+if ($passedTests -eq 3) { $note += 2 }
+elseif ($passedTests -eq 2) { $note += 1 }
+
+# =========================
+# Tests des groupes de sécurité
+# =========================
+
+Write-Log "`n──── Groupes de sécurité ────" "Yellow"
+
+$totalPoints += 3
+$groupsOk = 0
+
+if (Test-GroupExists -GroupName "GG_RH_Responsables" -Scope "Global" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "GG_RH_Gestionnaires" -Scope "Global" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "GG_RH_Tous" -Scope "Global" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "DL_RH_Contrats_M" -Scope "DomainLocal" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "DL_RH_Fiches_Paie_M" -Scope "DomainLocal" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "DL_RH_CV_L" -Scope "DomainLocal" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "DL_RH_CV_M" -Scope "DomainLocal" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+if (Test-GroupExists -GroupName "DL_RH_Communs_M" -Scope "DomainLocal" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
+
+# Attribution des points proportionnelle
+if ($groupsOk -eq 8) { $note += 3 }
+elseif ($groupsOk -ge 6) { $note += 2 }
+elseif ($groupsOk -ge 4) { $note += 1 }
+
+# =========================
+# Tests des utilisateurs
+# =========================
+
+Write-Log "`n──── Utilisateurs ────" "Yellow"
+
+$totalPoints += 2
+$usersOk = 0
+
+if (Test-UserExists -Login "mdurand" -FullName "Marie Durand" -OUPath $OUUtilisateurs) { $usersOk++ }
+if (Test-UserExists -Login "jmartin" -FullName "Jacques Martin" -OUPath $OUUtilisateurs) { $usersOk++ }
+if (Test-UserExists -Login "sleblanc" -FullName "Sophie Leblanc" -OUPath $OUUtilisateurs) { $usersOk++ }
+if (Test-UserExists -Login "pmoreau" -FullName "Pierre Moreau" -OUPath $OUUtilisateurs) { $usersOk++ }
+
+if ($usersOk -eq 4) { $note += 2 }
+elseif ($usersOk -eq 3) { $note += 1.5 }
+elseif ($usersOk -eq 2) { $note += 1 }
+elseif ($usersOk -eq 1) { $note += 0.5 }
+
+# =========================
+# Tests appartenance utilisateurs → groupes
+# =========================
+
+Write-Log "`n──── Appartenance utilisateurs → groupes ────" "Yellow"
+
+$totalPoints += 2
+$membershipOk = 0
+
+if (Test-UserInGroup -Login "mdurand" -GroupName "GG_RH_Responsables") { $membershipOk++ }
+if (Test-UserInGroup -Login "mdurand" -GroupName "GG_RH_Tous") { $membershipOk++ }
+if (Test-UserInGroup -Login "jmartin" -GroupName "GG_RH_Responsables") { $membershipOk++ }
+if (Test-UserInGroup -Login "jmartin" -GroupName "GG_RH_Tous") { $membershipOk++ }
+if (Test-UserInGroup -Login "sleblanc" -GroupName "GG_RH_Gestionnaires") { $membershipOk++ }
+if (Test-UserInGroup -Login "sleblanc" -GroupName "GG_RH_Tous") { $membershipOk++ }
+if (Test-UserInGroup -Login "pmoreau" -GroupName "GG_RH_Tous") { $membershipOk++ }
+
+if ($membershipOk -eq 7) { $note += 2 }
+elseif ($membershipOk -ge 5) { $note += 1.5 }
+elseif ($membershipOk -ge 3) { $note += 1 }
+
+# =========================
+# Tests structure de dossiers et partage
+# =========================
+
+Write-Log "`n──── Structure de dossiers et partage réseau ────" "Yellow"
+
+$totalPoints += 3
+$foldersOk = 0
+
+if (Test-FolderExists -Path "$CheminPartages") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\Contrats") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\Fiches_Paie") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\CV_Candidatures") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\Documents_Communs") { $foldersOk++ }
+
+# Test du partage réseau
+if (Test-ShareExists -ShareName "RH$" -Path "$CheminPartages") { $foldersOk++ }
+
+# Test des permissions de partage
+$domainNetbios = ($DomainDns -split '\.')[0].ToUpper()
+if (Test-SharePermission -ShareName "RH$" -Identity "GG_RH_Tous" -AccessRight "Full") { $foldersOk++ }
+
+if ($foldersOk -eq 7) { $note += 3 }
+elseif ($foldersOk -ge 5) { $note += 2 }
+elseif ($foldersOk -ge 3) { $note += 1 }
+
+# =========================
+# Tests imbrication groupes (AGDLP)
+# =========================
+
+Write-Log "`n──── Imbrication groupes (AGDLP) ────" "Yellow"
+
+$totalPoints += 3
+$agdlpOk = 0
+
+if (Test-GroupInGroup -MemberGroup "GG_RH_Responsables" -ParentGroup "DL_RH_Contrats_M") { $agdlpOk++ }
+if (Test-GroupInGroup -MemberGroup "GG_RH_Gestionnaires" -ParentGroup "DL_RH_Fiches_Paie_M") { $agdlpOk++ }
+if (Test-GroupInGroup -MemberGroup "GG_RH_Tous" -ParentGroup "DL_RH_CV_L") { $agdlpOk++ }
+if (Test-GroupInGroup -MemberGroup "GG_RH_Responsables" -ParentGroup "DL_RH_CV_M") { $agdlpOk++ }
+if (Test-GroupInGroup -MemberGroup "GG_RH_Tous" -ParentGroup "DL_RH_Communs_M") { $agdlpOk++ }
+
+if ($agdlpOk -eq 5) { $note += 3 }
+elseif ($agdlpOk -eq 4) { $note += 2.5 }
+elseif ($agdlpOk -eq 3) { $note += 2 }
+elseif ($agdlpOk -eq 2) { $note += 1 }
+
+# =========================
+# Tests permissions NTFS (explicites)
+# =========================
+
+Write-Log "`n──── Permissions NTFS explicites ────" "Yellow"
+
+$totalPoints += 5
+$ntfsOk = 0
+
+if (Test-NTFSPermission -Path "$CheminPartages\Contrats" -Identity "DL_RH_Contrats_M" -Rights "Modify") { $ntfsOk++ }
+if (Test-NTFSPermission -Path "$CheminPartages\Fiches_Paie" -Identity "DL_RH_Fiches_Paie_M" -Rights "Modify") { $ntfsOk++ }
+if (Test-NTFSPermission -Path "$CheminPartages\CV_Candidatures" -Identity "DL_RH_CV_L" -Rights "Read") { $ntfsOk++ }
+if (Test-NTFSPermission -Path "$CheminPartages\CV_Candidatures" -Identity "DL_RH_CV_M" -Rights "Modify") { $ntfsOk++ }
+if (Test-NTFSPermission -Path "$CheminPartages\Documents_Communs" -Identity "DL_RH_Communs_M" -Rights "Modify") { $ntfsOk++ }
+
+if ($ntfsOk -eq 5) { $note += 5 }
+elseif ($ntfsOk -eq 4) { $note += 4 }
+elseif ($ntfsOk -eq 3) { $note += 3 }
+elseif ($ntfsOk -eq 2) { $note += 2 }
+elseif ($ntfsOk -eq 1) { $note += 1 }
+
+# =========================
+# Résumé et envoi
+# =========================
+
+function Show-And-Send-Result {
+    param(
+        [string]$Nom,
+        [string]$Prenom,
+        [double]$Note,
+        [int]$Total,
+        [array]$Logs,
+        [string]$DomainDns
+    )
+    
+    $scoreSur20 = if ($Total -gt 0) { [math]::Round(($Note / $Total) * 20, 2) } else { 0 }
+    $pourcentage = if ($Total -gt 0) { [math]::Round(100 * $Note / $Total, 1) } else { 0 }
+    
+    $jsonFile = "C:\NTFS_Ex1-RH-$Nom-$Prenom.json"
+    $payload = [ordered]@{
+        status       = "OK"
+        timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        nom          = $Nom
+        prenom       = $Prenom
+        exercice     = "1 - Service RH"
+        domaine      = $DomainDns
+        score        = $Note
+        total        = $Total
+        note         = $scoreSur20
+        commentaires = ($Logs -join "`n")
+    } | ConvertTo-Json -Depth 4
+    
+    $payload | Set-Content -Path $jsonFile -Encoding UTF8
+    Write-Host ""
+    Write-Host "✅ Fichier JSON généré : $jsonFile" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "           RÉSULTAT FINAL" -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ("Exercice   : 1 - Service RH") -ForegroundColor White
+    Write-Host ("Étudiant   : $Prenom $Nom") -ForegroundColor White
+    Write-Host ("Domaine    : $DomainDns") -ForegroundColor White
+    Write-Host ("Points     : {0} / {1}" -f $Note, $Total) -ForegroundColor Cyan
+    Write-Host ("Note       : {0} / 20" -f $scoreSur20) -ForegroundColor Cyan
+    Write-Host ("Pourcentage: {0}%" -f $pourcentage) -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    
+    # Envoi optionnel
+    $serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=NTFS_Ex1-RH-$Nom-$Prenom.json"
+    try {
+        Invoke-RestMethod -Uri $serverUrl -Method Post -Body $payload -ContentType "application/json; charset=utf-8"
+        Write-Host "✅ Fichier JSON envoyé avec succès au serveur !" -ForegroundColor Green
+    } catch {
+        Write-Host "❌ Erreur lors de l'envoi du JSON : $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Show-And-Send-Result -Nom $Nom -Prenom $Prenom -Note $note -Total $totalPoints -Logs $logMessages -DomainDns $DomainDns
+
+Write-Host "`nAppuyez sur Entrée pour quitter..." -ForegroundColor Gray
+Read-Host
