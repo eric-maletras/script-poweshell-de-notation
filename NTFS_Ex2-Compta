@@ -1,0 +1,498 @@
+cls
+# =========================
+# Script de correction - Exercice 2 : Service Comptabilité
+# VERSION FINALE CORRIGÉE
+# =========================
+
+# =========================
+# En-tête / Inputs
+# =========================
+$Nom            = Read-Host "Entrez votre nom"
+$Prenom         = Read-Host "Entrez votre prénom"
+$Domain         = Read-Host "Entrez le nom du domaine (FQDN ex: labo.lan)"
+$LettreDisqueSup= Read-Host "Entrez la lettre du disque supplémentaire: (E: par défaut)"
+if (-not $LettreDisqueSup) { $LettreDisqueSup = "E:" }
+
+$NomServeurWeb  = Read-Host "Entrez le nom du serveur web (ex: srv-web)"
+$IpServeurWeb   = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
+$NomSiteWeb     = Read-Host "Entrez le nom du site web (CNAME) (ex: glpi)"
+if (-not $NomSiteWeb) { $NomSiteWeb = "glpi" }
+
+# Normalisation domaine
+$DomainDns = ([string]$Domain).Trim().TrimEnd('.')
+if ([string]::IsNullOrWhiteSpace($DomainDns) -or ($DomainDns -notmatch '^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$')) {
+    throw "Le domaine saisi '$Domain' n'est pas un FQDN valide (ex: labo.lan)."
+}
+$DomainDN = ($DomainDns -split '\.' | ForEach-Object { "DC=$_" }) -join ','
+
+# Variables spécifiques à l'exercice 2
+$OURacine = "OU=@$DomainDns,$DomainDN"
+$OUGroupes = "OU=groupes,$OURacine"
+$OUUtilisateurs = "OU=utilisateurs,$OURacine"
+$CheminPartages = "${LettreDisqueSup}\Partages\Compta"
+
+# Logs / Score
+$logMessages = @()
+$note = 0
+$totalPoints = 0
+
+function Write-Log([string]$Message,[string]$Color="Gray"){
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts - $Message"
+    $global:logMessages += $line
+    Write-Host $line -ForegroundColor $Color
+}
+
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+Write-Log "Correction Exercice 2 : Service Comptabilité" "Cyan"
+Write-Log "Domaine: $DomainDns" "Cyan"
+Write-Log "Étudiant: $Prenom $Nom" "Cyan"
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+
+# =========================
+# Fonctions de test
+# =========================
+
+function Test-OUExists {
+    param([string]$OUPath, [string]$Description)
+    $ok = [bool](Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUPath'" -ErrorAction SilentlyContinue)
+    if ($ok) { 
+        Write-Log "[OK] OU '$Description' existe : $OUPath" "Green" 
+    } else { 
+        Write-Log "[ERREUR] OU '$Description' absente : $OUPath" "Red" 
+    }
+    return $ok
+}
+
+function Test-UserExists {
+    param([string]$Login, [string]$FullName, [string]$OUPath)
+    $user = Get-ADUser -Filter "SamAccountName -eq '$Login'" -SearchBase $OUPath -Properties DisplayName -ErrorAction SilentlyContinue
+    
+    if (-not $user) {
+        Write-Log "[ERREUR] Utilisateur '$Login' absent dans $OUPath" "Red"
+        return $false
+    }
+    
+    Write-Log "[OK] Utilisateur '$Login' ($($user.DisplayName)) existe" "Green"
+    return $true
+}
+
+function Test-FolderExists {
+    param([string]$Path)
+    $ok = Test-Path -Path $Path -PathType Container
+    if ($ok) {
+        Write-Log "[OK] Dossier existe : $Path" "Green"
+    } else {
+        Write-Log "[ERREUR] Dossier absent : $Path" "Red"
+    }
+    return $ok
+}
+
+function Test-ShareExists {
+    param([string]$ShareName, [string]$Path)
+    $share = Get-SmbShare -Name $ShareName -ErrorAction SilentlyContinue
+    
+    if (-not $share) {
+        Write-Log "[ERREUR] Partage '$ShareName' inexistant" "Red"
+        return $false
+    }
+    
+    if ($share.Path -ne $Path) {
+        Write-Log "[ERREUR] Partage '$ShareName' pointe vers '$($share.Path)' au lieu de '$Path'" "Red"
+        return $false
+    }
+    
+    Write-Log "[OK] Partage '$ShareName' existe et pointe vers '$Path'" "Green"
+    return $true
+}
+
+# Fonction pour chercher les groupes domaine local ayant des permissions sur un dossier
+function Get-DomainLocalGroupsWithPermissions {
+    param([string]$Path)
+    
+    if (-not (Test-Path $Path)) { return @() }
+    
+    $acl = Get-Acl -Path $Path
+    $dlGroups = @()
+    
+    foreach ($ace in $acl.Access) {
+        if ($ace.IsInherited -eq $false -and $ace.AccessControlType -eq "Allow") {
+            $identity = $ace.IdentityReference.Value
+            
+            # Extraire le nom du groupe (après le \)
+            if ($identity -match '\\(.+)$') {
+                $groupName = $matches[1]
+                
+                # Vérifier si c'est un groupe domaine local
+                $group = Get-ADGroup -Filter "SamAccountName -eq '$groupName'" -Properties GroupScope -ErrorAction SilentlyContinue
+                if ($group -and $group.GroupScope -eq "DomainLocal") {
+                    $dlGroups += [PSCustomObject]@{
+                        Name = $groupName
+                        Rights = $ace.FileSystemRights
+                    }
+                }
+            }
+        }
+    }
+    
+    return $dlGroups
+}
+
+# Fonction CORRIGÉE pour tester l'accès effectif d'un utilisateur
+function Test-UserCanAccessFolder {
+    param(
+        [string]$Login,
+        [string]$Path,
+        [string]$ExpectedAccess  # "Read", "Modify", "None"
+    )
+    
+    if (-not (Test-Path $Path)) {
+        Write-Log "[ERREUR] Chemin '$Path' inexistant" "Red"
+        return $false
+    }
+    
+    $user = Get-ADUser -Filter "SamAccountName -eq '$Login'" -ErrorAction SilentlyContinue
+    if (-not $user) {
+        Write-Log "[ERREUR] Utilisateur '$Login' introuvable" "Red"
+        return $false
+    }
+    
+    # Récupérer TOUS les groupes de l'utilisateur
+    try {
+        $allGroups = Get-ADPrincipalGroupMembership -Identity $Login -ErrorAction Stop
+        $allGroupNames = @($Login) + ($allGroups | Select-Object -ExpandProperty SamAccountName)
+    } catch {
+        Write-Log "[WARNING] Impossible de récupérer les groupes de '$Login'" "Yellow"
+        $allGroupNames = @($Login)
+    }
+    
+    # Analyser les ACL
+    $acl = Get-Acl -Path $Path
+    $hasRead = $false
+    $hasModify = $false
+    
+    foreach ($ace in $acl.Access) {
+        if ($ace.AccessControlType -eq "Allow") {
+            # Extraire le nom du groupe de l'ACL
+            $identity = $ace.IdentityReference.Value
+            if ($identity -match '\\(.+)$') {
+                $aclGroupName = $matches[1]
+                
+                # Vérifier si ce groupe contient un des groupes de l'utilisateur
+                try {
+                    $aclGroup = Get-ADGroup -Filter "SamAccountName -eq '$aclGroupName'" -ErrorAction SilentlyContinue
+                    
+                    if ($aclGroup) {
+                        $aclGroupMembers = Get-ADGroupMember -Identity $aclGroupName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty SamAccountName
+                        
+                        # Vérifier si un des groupes de l'utilisateur est dans ce groupe ACL
+                        $matchingGroups = $allGroupNames | Where-Object { $aclGroupMembers -contains $_ }
+                        
+                        if ($matchingGroups) {
+                            $rights = $ace.FileSystemRights.ToString()
+                            
+                            if ($rights -match "FullControl") {
+                                $hasRead = $true
+                                $hasModify = $true
+                            }
+                            elseif ($rights -match "Modify|Write") {
+                                $hasRead = $true
+                                $hasModify = $true
+                            }
+                            elseif ($rights -match "ReadAndExecute|Read") {
+                                $hasRead = $true
+                            }
+                        }
+                    }
+                } catch {
+                    # Ignorer les erreurs (groupes système)
+                }
+            }
+        }
+    }
+    
+    $folderName = Split-Path $Path -Leaf
+    
+    switch ($ExpectedAccess) {
+        "None" {
+            if (-not $hasRead -and -not $hasModify) {
+                Write-Log "[OK] '$Login' n'a AUCUN accès à '$folderName' (correct)" "Green"
+                return $true
+            } else {
+                $actualAccess = if ($hasModify) { "Modification" } elseif ($hasRead) { "Lecture" } else { "?" }
+                Write-Log "[ERREUR] '$Login' a accès $actualAccess sur '$folderName' (devrait être refusé)" "Red"
+                return $false
+            }
+        }
+        "Read" {
+            if ($hasRead -and -not $hasModify) {
+                Write-Log "[OK] '$Login' a accès LECTURE sur '$folderName' (correct)" "Green"
+                return $true
+            } else {
+                if ($hasModify) {
+                    Write-Log "[ERREUR] '$Login' a accès MODIFICATION sur '$folderName' (attendu: Lecture seule)" "Red"
+                } elseif (-not $hasRead) {
+                    Write-Log "[ERREUR] '$Login' n'a PAS accès LECTURE sur '$folderName'" "Red"
+                }
+                return $false
+            }
+        }
+        "Modify" {
+            if ($hasModify) {
+                Write-Log "[OK] '$Login' a accès MODIFICATION sur '$folderName' (correct)" "Green"
+                return $true
+            } else {
+                if ($hasRead) {
+                    Write-Log "[ERREUR] '$Login' a seulement LECTURE sur '$folderName' (attendu: Modification)" "Red"
+                } else {
+                    Write-Log "[ERREUR] '$Login' n'a AUCUN accès sur '$folderName' (attendu: Modification)" "Red"
+                }
+                return $false
+            }
+        }
+    }
+    
+    return $false
+}
+
+# =========================
+# Tests de la structure AD
+# =========================
+
+Write-Log "`n──── Vérification structure AD ────" "Yellow"
+
+$totalPoints += 2
+$passedTests = 0
+if (Test-OUExists -OUPath $OURacine -Description "OU Racine @$DomainDns") { $passedTests++ }
+if (Test-OUExists -OUPath $OUGroupes -Description "OU Groupes") { $passedTests++ }
+if (Test-OUExists -OUPath $OUUtilisateurs -Description "OU Utilisateurs") { $passedTests++ }
+if ($passedTests -eq 3) { $note += 2 }
+elseif ($passedTests -eq 2) { $note += 1 }
+
+# =========================
+# Tests des utilisateurs
+# =========================
+
+Write-Log "`n──── Utilisateurs ────" "Yellow"
+
+$totalPoints += 2
+$usersOk = 0
+
+if (Test-UserExists -Login "aduval" -FullName "Anne Duval" -OUPath $OUUtilisateurs) { $usersOk++ }
+if (Test-UserExists -Login "bbernard" -FullName "Bruno Bernard" -OUPath $OUUtilisateurs) { $usersOk++ }
+if (Test-UserExists -Login "cmoreau" -FullName "Christine Moreau" -OUPath $OUUtilisateurs) { $usersOk++ }
+if (Test-UserExists -Login "drichards" -FullName "Daniel Richards" -OUPath $OUUtilisateurs) { $usersOk++ }
+
+if ($usersOk -eq 4) { $note += 2 }
+elseif ($usersOk -eq 3) { $note += 1.5 }
+elseif ($usersOk -eq 2) { $note += 1 }
+elseif ($usersOk -eq 1) { $note += 0.5 }
+
+# =========================
+# Tests structure de dossiers et partage
+# =========================
+
+Write-Log "`n──── Structure de dossiers et partage réseau ────" "Yellow"
+
+$totalPoints += 2
+$foldersOk = 0
+
+if (Test-FolderExists -Path "$CheminPartages") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\Bilans") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\Factures") { $foldersOk++ }
+if (Test-FolderExists -Path "$CheminPartages\Archives") { $foldersOk++ }
+
+# Test du partage réseau (teste Compta$ et Compta)
+$shareOk = $false
+if (Test-ShareExists -ShareName "Compta$" -Path "$CheminPartages") { 
+    $shareOk = $true 
+} elseif (Test-ShareExists -ShareName "Compta" -Path "$CheminPartages") { 
+    $shareOk = $true 
+}
+if ($shareOk) { $foldersOk++ }
+
+if ($foldersOk -eq 5) { $note += 2 }
+elseif ($foldersOk -ge 3) { $note += 1.5 }
+elseif ($foldersOk -ge 2) { $note += 1 }
+
+# =========================
+# Tests permissions NTFS - Recherche de groupes domaine local
+# =========================
+
+Write-Log "`n──── Permissions NTFS (recherche automatique des groupes DL) ────" "Yellow"
+
+# Test permissions sur Bilans
+$totalPoints += 3
+$bilansScore = 0
+
+$bilansGroups = Get-DomainLocalGroupsWithPermissions -Path "$CheminPartages\Bilans"
+$hasReadGroup = $bilansGroups | Where-Object { $_.Rights -match "Read" -and $_.Rights -notmatch "Write|Modify" }
+$hasModifyGroup = $bilansGroups | Where-Object { $_.Rights -match "Modify|Write|FullControl" }
+
+if ($hasReadGroup) {
+    Write-Log "[OK] Groupe(s) DL avec Lecture trouvé(s) sur Bilans : $($hasReadGroup.Name -join ', ')" "Green"
+    $bilansScore += 1.5
+}
+if ($hasModifyGroup) {
+    Write-Log "[OK] Groupe(s) DL avec Modification trouvé(s) sur Bilans : $($hasModifyGroup.Name -join ', ')" "Green"
+    $bilansScore += 1.5
+}
+if (-not $hasReadGroup -and -not $hasModifyGroup) {
+    Write-Log "[ERREUR] Aucun groupe DL avec permissions sur Bilans" "Red"
+}
+
+$note += $bilansScore
+
+# Test permissions sur Factures
+$totalPoints += 3
+$facturesScore = 0
+
+$facturesGroups = Get-DomainLocalGroupsWithPermissions -Path "$CheminPartages\Factures"
+$hasReadGroup = $facturesGroups | Where-Object { $_.Rights -match "Read" -and $_.Rights -notmatch "Write|Modify" }
+$hasModifyGroup = $facturesGroups | Where-Object { $_.Rights -match "Modify|Write|FullControl" }
+
+if ($hasReadGroup) {
+    Write-Log "[OK] Groupe(s) DL avec Lecture trouvé(s) sur Factures : $($hasReadGroup.Name -join ', ')" "Green"
+    $facturesScore += 1.5
+}
+if ($hasModifyGroup) {
+    Write-Log "[OK] Groupe(s) DL avec Modification trouvé(s) sur Factures : $($hasModifyGroup.Name -join ', ')" "Green"
+    $facturesScore += 1.5
+}
+if (-not $hasReadGroup -and -not $hasModifyGroup) {
+    Write-Log "[ERREUR] Aucun groupe DL avec permissions sur Factures" "Red"
+}
+
+$note += $facturesScore
+
+# Test permissions sur Archives
+$totalPoints += 3
+$archivesScore = 0
+
+$archivesGroups = Get-DomainLocalGroupsWithPermissions -Path "$CheminPartages\Archives"
+$hasReadGroup = $archivesGroups | Where-Object { $_.Rights -match "Read" -and $_.Rights -notmatch "Write|Modify" }
+$hasModifyGroup = $archivesGroups | Where-Object { $_.Rights -match "Modify|Write|FullControl" }
+
+if ($hasReadGroup) {
+    Write-Log "[OK] Groupe(s) DL avec Lecture trouvé(s) sur Archives : $($hasReadGroup.Name -join ', ')" "Green"
+    $archivesScore += 1.5
+}
+if ($hasModifyGroup) {
+    Write-Log "[OK] Groupe(s) DL avec Modification trouvé(s) sur Archives : $($hasModifyGroup.Name -join ', ')" "Green"
+    $archivesScore += 1.5
+}
+if (-not $hasReadGroup -and -not $hasModifyGroup) {
+    Write-Log "[ERREUR] Aucun groupe DL avec permissions sur Archives" "Red"
+}
+
+$note += $archivesScore
+
+# =========================
+# Tests fonctionnels des accès utilisateurs
+# =========================
+
+Write-Log "`n──── Tests fonctionnels des accès utilisateurs ────" "Yellow"
+
+# Tests aduval (Responsable) - 3 points
+$totalPoints += 3
+$aduvalOk = 0
+if (Test-UserCanAccessFolder -Login "aduval" -Path "$CheminPartages\Bilans" -ExpectedAccess "Modify") { $aduvalOk++ }
+if (Test-UserCanAccessFolder -Login "aduval" -Path "$CheminPartages\Factures" -ExpectedAccess "Modify") { $aduvalOk++ }
+if (Test-UserCanAccessFolder -Login "aduval" -Path "$CheminPartages\Archives" -ExpectedAccess "Modify") { $aduvalOk++ }
+
+if ($aduvalOk -eq 3) { $note += 3 }
+elseif ($aduvalOk -eq 2) { $note += 2 }
+elseif ($aduvalOk -eq 1) { $note += 1 }
+
+# Tests bbernard (Comptable) - 3 points
+$totalPoints += 3
+$bbernardOk = 0
+if (Test-UserCanAccessFolder -Login "bbernard" -Path "$CheminPartages\Bilans" -ExpectedAccess "Read") { $bbernardOk++ }
+if (Test-UserCanAccessFolder -Login "bbernard" -Path "$CheminPartages\Factures" -ExpectedAccess "Modify") { $bbernardOk++ }
+if (Test-UserCanAccessFolder -Login "bbernard" -Path "$CheminPartages\Archives" -ExpectedAccess "Read") { $bbernardOk++ }
+
+if ($bbernardOk -eq 3) { $note += 3 }
+elseif ($bbernardOk -eq 2) { $note += 2 }
+elseif ($bbernardOk -eq 1) { $note += 1 }
+
+# Tests cmoreau (Assistant) - 3 points
+$totalPoints += 3
+$cmoreauOk = 0
+if (Test-UserCanAccessFolder -Login "cmoreau" -Path "$CheminPartages\Bilans" -ExpectedAccess "None") { $cmoreauOk++ }
+if (Test-UserCanAccessFolder -Login "cmoreau" -Path "$CheminPartages\Factures" -ExpectedAccess "Read") { $cmoreauOk++ }
+if (Test-UserCanAccessFolder -Login "cmoreau" -Path "$CheminPartages\Archives" -ExpectedAccess "Read") { $cmoreauOk++ }
+
+if ($cmoreauOk -eq 3) { $note += 3 }
+elseif ($cmoreauOk -eq 2) { $note += 2 }
+elseif ($cmoreauOk -eq 1) { $note += 1 }
+
+# Tests drichards (Stagiaire - AUCUN accès) - 2 points
+$totalPoints += 2
+$drichardsOk = 0
+if (Test-UserCanAccessFolder -Login "drichards" -Path "$CheminPartages\Bilans" -ExpectedAccess "None") { $drichardsOk++ }
+if (Test-UserCanAccessFolder -Login "drichards" -Path "$CheminPartages\Factures" -ExpectedAccess "None") { $drichardsOk++ }
+if (Test-UserCanAccessFolder -Login "drichards" -Path "$CheminPartages\Archives" -ExpectedAccess "None") { $drichardsOk++ }
+
+if ($drichardsOk -eq 3) { $note += 2 }
+elseif ($drichardsOk -eq 2) { $note += 1 }
+
+# =========================
+# Résumé et envoi
+# =========================
+
+function Show-And-Send-Result {
+    param(
+        [string]$Nom,
+        [string]$Prenom,
+        [double]$Note,
+        [int]$Total,
+        [array]$Logs,
+        [string]$DomainDns
+    )
+    
+    $scoreSur20 = if ($Total -gt 0) { [math]::Round(($Note / $Total) * 20, 2) } else { 0 }
+    $pourcentage = if ($Total -gt 0) { [math]::Round(100 * $Note / $Total, 1) } else { 0 }
+    
+    $jsonFile = "C:\NTFS_Ex2-Compta-$Nom-$Prenom.json"
+    $payload = [ordered]@{
+        status       = "OK"
+        timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        nom          = $Nom
+        prenom       = $Prenom
+        exercice     = "2 - Service Comptabilité"
+        domaine      = $DomainDns
+        score        = $Note
+        total        = $Total
+        note         = $scoreSur20
+        commentaires = ($Logs -join "`n")
+    } | ConvertTo-Json -Depth 4
+    
+    $payload | Set-Content -Path $jsonFile -Encoding UTF8
+    Write-Host ""
+    Write-Host "✅ Fichier JSON généré : $jsonFile" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "           RÉSULTAT FINAL" -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ("Exercice   : 2 - Service Comptabilité") -ForegroundColor White
+    Write-Host ("Étudiant   : $Prenom $Nom") -ForegroundColor White
+    Write-Host ("Domaine    : $DomainDns") -ForegroundColor White
+    Write-Host ("Points     : {0} / {1}" -f $Note, $Total) -ForegroundColor Cyan
+    Write-Host ("Note       : {0} / 20" -f $scoreSur20) -ForegroundColor Cyan
+    Write-Host ("Pourcentage: {0}%" -f $pourcentage) -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    
+    # Envoi optionnel
+    $serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=NTFS_Ex2-Compta-$Nom-$Prenom.json"
+    try {
+        Invoke-RestMethod -Uri $serverUrl -Method Post -Body $payload -ContentType "application/json; charset=utf-8"
+        Write-Host "✅ Fichier JSON envoyé avec succès au serveur !" -ForegroundColor Green
+    } catch {
+        Write-Host "❌ Erreur lors de l'envoi du JSON : $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Show-And-Send-Result -Nom $Nom -Prenom $Prenom -Note $note -Total $totalPoints -Logs $logMessages -DomainDns $DomainDns
+
+Write-Host "`nAppuyez sur Entrée pour quitter..." -ForegroundColor Gray
+Read-Host
