@@ -1,0 +1,608 @@
+<#
+.SYNOPSIS
+    Script de préparation du TP2 - Création d'une GPO avec 3 bugs cumulés pour l'exercice de dépannage
+
+.DESCRIPTION
+    Ce script crée volontairement une GPO avec 3 erreurs de configuration cumulées pour permettre
+    aux étudiants de pratiquer le diagnostic et la résolution de problèmes GPO.
+    
+    Les 3 bugs introduits simultanément :
+    1. Utilisateur dans la mauvaise OU (CN=Users au lieu de OU=Comptabilite)
+    2. Lien GPO désactivé (icône grisée dans GPMC)
+    3. Filtrage de sécurité incorrect (utilisateur non autorisé)
+
+.PARAMETER DomainName
+    Nom du domaine (par défaut : détecté automatiquement)
+
+.PARAMETER UserName
+    Nom de l'utilisateur de test (par défaut : jmartin)
+
+.EXAMPLE
+    .\Prepare-TP2-GPO-Buggy.ps1
+    Crée l'environnement avec les 3 bugs cumulés
+
+.EXAMPLE
+    .\Prepare-TP2-GPO-Buggy.ps1 -UserName "alice" -DomainName "formation.lan"
+    Crée l'environnement pour l'utilisateur alice sur le domaine formation.lan
+
+.NOTES
+    Auteur  : BTS SIO SISR
+    Version : 2.0
+    Prérequis : 
+    - Exécution sur un contrôleur de domaine
+    - Module ActiveDirectory et GroupPolicy installés
+    - Droits administrateur de domaine
+    - OU @xxx.lan (ou .lab, .xx) avec sous-OU Utilisateurs déjà créée
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$DomainName = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$UserName = "jmartin"
+)
+
+# ============================================================================
+# VÉRIFICATIONS PRÉALABLES
+# ============================================================================
+
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  PRÉPARATION TP2 - GPO MAL CONFIGURÉE" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# Vérifier les modules
+Write-Host "[1/4] Vérification des modules PowerShell..." -ForegroundColor Yellow
+$requiredModules = @("ActiveDirectory", "GroupPolicy")
+foreach ($module in $requiredModules) {
+    if (-not (Get-Module -ListAvailable -Name $module)) {
+        Write-Host "❌ Module $module non disponible. Installez les outils RSAT." -ForegroundColor Red
+        exit 1
+    }
+    Import-Module $module -ErrorAction SilentlyContinue
+}
+Write-Host "✅ Modules chargés avec succès" -ForegroundColor Green
+Write-Host ""
+
+# Vérifier qu'on est sur un DC
+Write-Host "[2/4] Vérification du rôle contrôleur de domaine..." -ForegroundColor Yellow
+try {
+    $domain = Get-ADDomain -ErrorAction Stop
+    Write-Host "✅ Domaine détecté : $($domain.DNSRoot)" -ForegroundColor Green
+    
+    # Si DomainName n'est pas spécifié, utiliser le domaine détecté
+    if ([string]::IsNullOrEmpty($DomainName)) {
+        $DomainName = $domain.DNSRoot
+    }
+} catch {
+    Write-Host "❌ Ce script doit être exécuté sur un contrôleur de domaine" -ForegroundColor Red
+    exit 1
+}
+Write-Host ""
+
+# ============================================================================
+# VARIABLES
+# ============================================================================
+
+$GPOName = "GPO_Compta_Restrictions"
+# La structure sera : OU=Comptabilite,OU=Utilisateurs,OU=@xxx.lan (détecté plus tard)
+# $OUComptabilite sera défini après détection de l'OU racine
+$OUMauvaise = "CN=Users,$($domain.DistinguishedName)"
+$UserFullName = "$UserName@$DomainName"
+$GroupeTest = "Groupe_Compta_Restreints"
+
+# ============================================================================
+# NETTOYAGE PRÉALABLE (si déjà exécuté)
+# ============================================================================
+
+Write-Host "[3/7] Nettoyage des objets existants (si présents)..." -ForegroundColor Yellow
+
+# Supprimer la GPO si elle existe
+try {
+    $existingGPO = Get-GPO -Name $GPOName -ErrorAction SilentlyContinue
+    if ($existingGPO) {
+        Remove-GPO -Name $GPOName -Confirm:$false
+        Write-Host "  ➜ GPO '$GPOName' supprimée" -ForegroundColor Gray
+    }
+} catch {}
+
+# Supprimer le groupe de test s'il existe
+try {
+    $existingGroup = Get-ADGroup -Identity $GroupeTest -ErrorAction SilentlyContinue
+    if ($existingGroup) {
+        Remove-ADGroup -Identity $GroupeTest -Confirm:$false
+        Write-Host "  ➜ Groupe '$GroupeTest' supprimé" -ForegroundColor Gray
+    }
+} catch {}
+
+Write-Host "✅ Nettoyage terminé" -ForegroundColor Green
+Write-Host ""
+
+# ============================================================================
+# DÉTECTION DE LA STRUCTURE D'OU (OU @xxx.lan/lab/xx et OU Utilisateurs)
+# ============================================================================
+
+Write-Host "[4/7] Détection de la structure d'OU existante..." -ForegroundColor Yellow
+
+# Chercher une OU commençant par @ (ex: @labo.lan, @prenom.lab, @formation.local, @test.xx)
+$ouRacine = Get-ADOrganizationalUnit -Filter 'Name -like "@*.*"' -SearchBase $domain.DistinguishedName -SearchScope OneLevel | Select-Object -First 1
+
+if (-not $ouRacine) {
+    # Essayer aussi sans point (au cas où : @labo, @formation, etc.)
+    $ouRacine = Get-ADOrganizationalUnit -Filter 'Name -like "@*"' -SearchBase $domain.DistinguishedName -SearchScope OneLevel | Select-Object -First 1
+}
+
+if (-not $ouRacine) {
+    Write-Host "  ⚠️  Aucune OU commençant par '@' trouvée à la racine du domaine" -ForegroundColor Yellow
+    Write-Host "  ℹ️  Création de la structure par défaut : OU=@$($domain.DNSRoot)" -ForegroundColor Cyan
+    
+    # Créer l'OU racine @domaine.extension
+    $ouRacineName = "@$($domain.DNSRoot)"
+    try {
+        New-ADOrganizationalUnit -Name $ouRacineName -Path $domain.DistinguishedName -ProtectedFromAccidentalDeletion $false
+        $ouRacine = Get-ADOrganizationalUnit -Filter "Name -eq '$ouRacineName'"
+        Write-Host "  ➜ OU '$ouRacineName' créée" -ForegroundColor Gray
+    } catch {
+        Write-Host "  ❌ Erreur lors de la création de l'OU racine : $_" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "  ✅ OU racine trouvée : $($ouRacine.Name)" -ForegroundColor Green
+}
+
+# Chercher une OU "Utilisateurs" dans l'OU racine
+$ouUtilisateurs = Get-ADOrganizationalUnit -Filter 'Name -eq "Utilisateurs"' -SearchBase $ouRacine.DistinguishedName -SearchScope OneLevel -ErrorAction SilentlyContinue
+
+if (-not $ouUtilisateurs) {
+    Write-Host "  ⚠️  OU 'Utilisateurs' non trouvée dans $($ouRacine.Name)" -ForegroundColor Yellow
+    Write-Host "  ℹ️  Création de OU=Utilisateurs" -ForegroundColor Cyan
+    
+    try {
+        New-ADOrganizationalUnit -Name "Utilisateurs" -Path $ouRacine.DistinguishedName -ProtectedFromAccidentalDeletion $false
+        $ouUtilisateurs = Get-ADOrganizationalUnit -Filter "Name -eq 'Utilisateurs'" -SearchBase $ouRacine.DistinguishedName -SearchScope OneLevel
+        Write-Host "  ➜ OU 'Utilisateurs' créée dans $($ouRacine.Name)" -ForegroundColor Gray
+    } catch {
+        Write-Host "  ❌ Erreur lors de la création de l'OU Utilisateurs : $_" -ForegroundColor Red
+        exit 1
+    }
+} else {
+    Write-Host "  ✅ OU 'Utilisateurs' trouvée : $($ouUtilisateurs.DistinguishedName)" -ForegroundColor Green
+}
+
+$OUUtilisateursPath = $ouUtilisateurs.DistinguishedName
+
+# Définir les chemins complets maintenant qu'on a détecté la structure
+$OUComptabilite = "OU=Comptabilite,$OUUtilisateursPath"
+
+Write-Host "  ℹ️  Structure cible : $OUComptabilite" -ForegroundColor Cyan
+Write-Host ""
+
+# ============================================================================
+# CRÉATION DE L'INFRASTRUCTURE DE BASE
+# ============================================================================
+
+Write-Host "[5/7] Création de l'infrastructure de base..." -ForegroundColor Yellow
+
+# Créer l'OU Comptabilite dans OU=Utilisateurs si elle n'existe pas
+try {
+    $ouExists = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUComptabilite'" -ErrorAction SilentlyContinue
+    if (-not $ouExists) {
+        New-ADOrganizationalUnit -Name "Comptabilite" -Path $OUUtilisateursPath -ProtectedFromAccidentalDeletion $false
+        Write-Host "  ➜ OU 'Comptabilite' créée dans OU=Utilisateurs,$($ouRacine.Name)" -ForegroundColor Gray
+    } else {
+        Write-Host "  ➜ OU 'Comptabilite' déjà existante" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "⚠️  Erreur lors de la création de l'OU Comptabilite : $_" -ForegroundColor Yellow
+}
+
+# Créer l'utilisateur jmartin si il n'existe pas
+Write-Host "  ➜ Vérification de l'utilisateur '$UserName'..." -ForegroundColor Gray
+try {
+    $userExists = Get-ADUser -Filter "SamAccountName -eq '$UserName'" -ErrorAction SilentlyContinue
+    if (-not $userExists) {
+        # Créer l'utilisateur dans OU=Comptabilite (il sera déplacé ensuite dans CN=Users pour le bug 1)
+        $userCreationPath = $OUComptabilite
+        Write-Host "  ➜ Création de '$UserName' dans OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name)" -ForegroundColor Gray
+        
+        $userParams = @{
+            Name = "Jacques Martin"
+            GivenName = "Jacques"
+            Surname = "Martin"
+            SamAccountName = $UserName
+            UserPrincipalName = $UserFullName
+            Path = $userCreationPath
+            AccountPassword = (ConvertTo-SecureString "P@ssw0rd123!" -AsPlainText -Force)
+            Enabled = $true
+            ChangePasswordAtLogon = $false
+            PasswordNeverExpires = $true
+        }
+        New-ADUser @userParams
+        Write-Host "  ✅ Utilisateur '$UserName' créé avec succès" -ForegroundColor Green
+    } else {
+        Write-Host "  ➜ Utilisateur '$UserName' déjà existant" -ForegroundColor Gray
+    }
+} catch {
+    Write-Host "  ❌ Erreur lors de la création de l'utilisateur : $_" -ForegroundColor Red
+    Write-Host "  ℹ️  Détails : $($_.Exception.Message)" -ForegroundColor Yellow
+}
+
+# Créer le groupe de test
+try {
+    New-ADGroup -Name $GroupeTest -GroupScope Global -GroupCategory Security -Path $OUComptabilite
+    Write-Host "  ➜ Groupe '$GroupeTest' créé" -ForegroundColor Gray
+} catch {
+    Write-Host "⚠️  Erreur lors de la création du groupe : $_" -ForegroundColor Yellow
+}
+
+Write-Host "✅ Infrastructure de base prête" -ForegroundColor Green
+Write-Host ""
+
+# ============================================================================
+# CRÉATION DE LA GPO ET CONFIGURATION DU BUG
+# ============================================================================
+
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  CONFIGURATION DU SCÉNARIO $ScenarioNumber" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# Créer la GPO
+Write-Host "[6/7] Création de la GPO '$GPOName'..." -ForegroundColor Yellow
+$gpo = New-GPO -Name $GPOName -Comment "GPO de test pour TP2 - Dépannage"
+
+# Configurer le paramètre : Bloquer l'accès au Panneau de configuration
+Write-Host "Configuration du paramètre : Bloquer le Panneau de configuration..." -ForegroundColor Yellow
+$regPath = "HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer"
+Set-GPRegistryValue -Name $GPOName -Key $regPath -ValueName "NoControlPanel" -Type DWord -Value 1
+Write-Host "✅ Paramètre configuré (NoControlPanel = 1)" -ForegroundColor Green
+Write-Host ""
+
+# ============================================================================
+# APPLICATION DES SCÉNARIOS DE BUG (CUMUL DE 3 PROBLÈMES)
+# ============================================================================
+
+Write-Host "[7/7] Application des scénarios de bug (3 problèmes cumulés)..." -ForegroundColor Yellow
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BUG 1 : Utilisateur dans la mauvaise OU
+# ═══════════════════════════════════════════════════════════════════════════
+
+Write-Host "🐛 BUG 1 : Utilisateur dans la mauvaise OU" -ForegroundColor Red
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Gray
+
+# Lier la GPO normalement
+New-GPLink -Name $GPOName -Target $OUComptabilite
+
+# Déplacer l'utilisateur dans CN=Users (s'il n'y est pas déjà)
+$user = Get-ADUser -Identity $UserName
+$currentUserOU = $user.DistinguishedName -replace "^CN=$UserName,", ""
+if ($currentUserOU -ne $OUMauvaise) {
+    Write-Host "  ➜ Déplacement de '$UserName' vers CN=Users" -ForegroundColor Gray
+    Move-ADObject -Identity $user.DistinguishedName -TargetPath $OUMauvaise
+}
+
+Write-Host "  ✅ GPO liée à OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name)" -ForegroundColor Green
+Write-Host "  ❌ Utilisateur '$UserName' déplacé dans CN=Users (hors de l'OU ciblée)" -ForegroundColor Yellow
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BUG 2 : Lien GPO désactivé
+# ═══════════════════════════════════════════════════════════════════════════
+
+Write-Host "🐛 BUG 2 : Lien GPO désactivé" -ForegroundColor Red
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Gray
+
+# Désactiver le lien de la GPO
+Set-GPLink -Guid $gpo.Id -Target $OUComptabilite -LinkEnabled No
+
+Write-Host "  ✅ GPO créée et liée" -ForegroundColor Green
+Write-Host "  ❌ Lien GPO DÉSACTIVÉ (icône grisée dans GPMC)" -ForegroundColor Yellow
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# BUG 3 : Filtrage de sécurité incorrect
+# ═══════════════════════════════════════════════════════════════════════════
+
+Write-Host "🐛 BUG 3 : Filtrage de sécurité incorrect" -ForegroundColor Red
+Write-Host "─────────────────────────────────────────────────────────" -ForegroundColor Gray
+
+# Récupérer les SID des groupes bien connus
+$domainSID = (Get-ADDomain).DomainSID.Value
+$authenticatedUsersSID = New-Object System.Security.Principal.SecurityIdentifier("S-1-5-11")
+$domainAdminsSID = New-Object System.Security.Principal.SecurityIdentifier("$domainSID-512")
+$domainComputersSID = New-Object System.Security.Principal.SecurityIdentifier("$domainSID-515")
+
+Write-Host "  ➜ Récupération de l'objet GPO..." -ForegroundColor Gray
+$gpoObject = Get-GPO -Name $GPOName
+
+# Obtenir le chemin AD de la GPO
+$gpoADPath = "CN={$($gpoObject.Id)},CN=Policies,CN=System,$($domain.DistinguishedName)"
+
+Write-Host "  ➜ Modification des ACL de sécurité de la GPO..." -ForegroundColor Gray
+
+# Obtenir l'objet AD de la GPO pour manipuler ses ACL
+$gpoADObject = [ADSI]"LDAP://$gpoADPath"
+$acl = $gpoADObject.ObjectSecurity
+
+# Supprimer TOUTES les ACE (Access Control Entry) pour "Authenticated Users" (S-1-5-11)
+$acesToRemove = @()
+foreach ($ace in $acl.Access) {
+    if ($ace.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -eq "S-1-5-11") {
+        $acesToRemove += $ace
+    }
+}
+
+foreach ($ace in $acesToRemove) {
+    $acl.RemoveAccessRule($ace) | Out-Null
+    Write-Host "    ➜ ACE retirée pour Authenticated Users" -ForegroundColor Gray
+}
+
+# Obtenir le SID du groupe Groupe_Compta_Restreints
+$groupeSID = (Get-ADGroup -Identity $GroupeTest).SID
+
+# Créer les nouvelles ACE pour le groupe restreint
+# Droit GpoApply = READ (0x20094) + APPLY_GROUP_POLICY (0x100)
+$gpoApplyRights = [System.DirectoryServices.ActiveDirectoryRights]::GenericRead -bor 
+                  [System.DirectoryServices.ActiveDirectoryRights]::ReadProperty -bor
+                  [System.DirectoryServices.ActiveDirectoryRights]::GenericExecute
+
+$aceGroupe = New-Object System.DirectoryServices.ActiveDirectoryAccessRule(
+    $groupeSID,
+    $gpoApplyRights,
+    [System.Security.AccessControl.AccessControlType]::Allow,
+    [System.DirectoryServices.ActiveDirectorySecurityInheritance]::None
+)
+
+$acl.AddAccessRule($aceGroupe)
+Write-Host "    ➜ ACE ajoutée pour '$GroupeTest'" -ForegroundColor Gray
+
+# Appliquer les modifications
+$gpoADObject.ObjectSecurity = $acl
+$gpoADObject.CommitChanges()
+
+# Attendre un peu que les changements se propagent
+Start-Sleep -Seconds 2
+
+# IMPORTANT : Ajouter aussi via Set-GPPermission pour que ça apparaisse dans GPMC
+Write-Host "  ➜ Ajout du groupe '$GroupeTest' au filtrage de sécurité..." -ForegroundColor Gray
+try {
+    Set-GPPermission -Name $GPOName -TargetName $GroupeTest -TargetType Group -PermissionLevel GpoApply -ErrorAction Stop
+    Write-Host "    ✓ Groupe '$GroupeTest' ajouté au filtrage" -ForegroundColor Green
+} catch {
+    Write-Host "    ⚠️  Erreur lors de l'ajout : $_" -ForegroundColor Yellow
+}
+
+Write-Host "  ✅ ACL modifiées et filtrage configuré" -ForegroundColor Green
+Write-Host "  ❌ Filtrage : seul '$GroupeTest' peut appliquer (jmartin N'EN EST PAS membre)" -ForegroundColor Yellow
+Write-Host ""
+
+# Vérification finale via Get-GPPermission
+Write-Host "  📋 Vérification du filtrage de sécurité final :" -ForegroundColor Cyan
+Start-Sleep -Seconds 2  # Laisser le temps à AD de se mettre à jour
+try {
+    $finalPerms = Get-GPPermission -Name $GPOName -All | Where-Object {$_.Permission -eq "GpoApply" -or $_.Permission -match "Apply"}
+    if ($finalPerms) {
+        foreach ($p in $finalPerms) {
+            Write-Host "    ✓ $($p.Trustee.Name) → $($p.Permission)" -ForegroundColor White
+        }
+    } else {
+        Write-Host "    ✓ Aucun groupe avec GpoApply (vérifie dans GPMC)" -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "    ⚠️  Impossible de lire les permissions (vérifie manuellement dans GPMC)" -ForegroundColor Yellow
+}
+Write-Host ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RÉCAPITULATIF DES BUGS
+# ═══════════════════════════════════════════════════════════════════════════
+
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  RÉCAPITULATIF DES BUGS INTRODUITS" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "📋 DIAGNOSTIC ATTENDU (3 problèmes à trouver) :" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "1️⃣  UTILISATEUR MAL PLACÉ" -ForegroundColor Red
+Write-Host "   • ❌ jmartin est dans CN=Users au lieu de OU=Comptabilite" -ForegroundColor White
+Write-Host "   • Conséquence : La GPO ne peut pas s'appliquer (hors périmètre)" -ForegroundColor Gray
+Write-Host "   • Commande diagnostic : Get-ADUser jmartin | Select DistinguishedName" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "2️⃣  LIEN GPO DÉSACTIVÉ" -ForegroundColor Red
+Write-Host "   • ❌ Le lien GPO est désactivé (icône grisée dans GPMC)" -ForegroundColor White
+Write-Host "   • Conséquence : La GPO ne sera jamais appliquée même si l'utilisateur est au bon endroit" -ForegroundColor Gray
+Write-Host "   • Vérification : GPMC → OU=Comptabilite → Observer l'icône du lien" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "3️⃣  FILTRAGE DE SÉCURITÉ INCORRECT" -ForegroundColor Red
+Write-Host "   • ❌ Seul le groupe '$GroupeTest' peut appliquer la GPO" -ForegroundColor White
+Write-Host "   • ❌ jmartin n'est PAS membre de ce groupe" -ForegroundColor White
+Write-Host "   • Conséquence : Même avec lien actif et bon emplacement, la GPO sera refusée" -ForegroundColor Gray
+Write-Host "   • Vérification : GPMC → GPO → Onglet 'Étendue' → Section 'Filtrage de sécurité'" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "🔧 SOLUTIONS (dans l'ordre recommandé) :" -ForegroundColor Green
+Write-Host ""
+Write-Host "1️⃣  Déplacer jmartin de CN=Users vers OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name)" -ForegroundColor White
+Write-Host "   → Méthode : dsa.msc → Rechercher jmartin → Clic droit → Déplacer" -ForegroundColor Gray
+Write-Host ""
+Write-Host "2️⃣  Activer le lien GPO dans GPMC" -ForegroundColor White
+Write-Host "   → Méthode : GPMC → Clic droit sur le lien → Cocher 'Lien activé'" -ForegroundColor Gray
+Write-Host ""
+Write-Host "3️⃣  Corriger le filtrage de sécurité (2 options)" -ForegroundColor White
+Write-Host "   → Option A : Ajouter jmartin au groupe '$GroupeTest'" -ForegroundColor Gray
+Write-Host "   → Option B : Ajouter 'Utilisateurs authentifiés' au filtrage de sécurité" -ForegroundColor Gray
+Write-Host ""
+
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  RÉCAPITULATIF DE LA CONFIGURATION" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "📌 Informations de base :" -ForegroundColor Yellow
+Write-Host "   • Domaine       : $($domain.DNSRoot)" -ForegroundColor White
+Write-Host "   • GPO créée     : $GPOName" -ForegroundColor White
+Write-Host "   • Structure OU  : $($ouRacine.Name) → OU=Utilisateurs → OU=Comptabilite" -ForegroundColor White
+Write-Host "   • OU cible GPO  : OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name)" -ForegroundColor White
+Write-Host "   • Utilisateur   : $UserName" -ForegroundColor White
+Write-Host "   • Mot de passe  : P@ssw0rd123!" -ForegroundColor White
+Write-Host "   • Paramètre GPO : Bloquer le Panneau de configuration" -ForegroundColor White
+Write-Host ""
+Write-Host "🐛 Bugs introduits : 3 problèmes cumulés" -ForegroundColor Red
+Write-Host ""
+Write-Host "📚 Pour le formateur :" -ForegroundColor Magenta
+Write-Host "   • Les étudiants doivent diagnostiquer et corriger les 3 bugs" -ForegroundColor White
+Write-Host "   • Ordre de résolution recommandé : 1→2→3 (utilisateur, lien, filtrage)" -ForegroundColor White
+Write-Host "   • Solution détaillée affichée ci-dessus pour votre référence" -ForegroundColor White
+Write-Host "   • Fichier de référence généré dans C:\TP2_Solution.txt" -ForegroundColor White
+Write-Host ""
+Write-Host "✅ Configuration terminée ! Les étudiants peuvent commencer le TP2." -ForegroundColor Green
+Write-Host ""
+
+# ============================================================================
+# GÉNÉRATION D'UN FICHIER DE RÉFÉRENCE POUR LE FORMATEUR
+# ============================================================================
+
+$referenceFile = "C:\TP2_Solution.txt"
+$referenceContent = @"
+═══════════════════════════════════════════════════════════
+  TP2 - SOLUTION DES 3 BUGS CUMULÉS
+═══════════════════════════════════════════════════════════
+
+Date de création : $(Get-Date -Format "dd/MM/yyyy HH:mm")
+Domaine : $($domain.DNSRoot)
+
+─────────────────────────────────────────────────────────
+CONFIGURATION DE BASE
+─────────────────────────────────────────────────────────
+• GPO        : $GPOName
+• Structure  : $($ouRacine.Name) → OU=Utilisateurs → OU=Comptabilite
+• OU cible   : OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name)
+• Utilisateur: $UserName (mot de passe : P@ssw0rd123!)
+• Paramètre  : HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\NoControlPanel = 1
+
+─────────────────────────────────────────────────────────
+3 PROBLÈMES INTRODUITS (À CORRIGER DANS L'ORDRE)
+─────────────────────────────────────────────────────────
+
+🐛 BUG 1 : UTILISATEUR DANS LA MAUVAISE OU
+
+SYMPTÔME :
+L'utilisateur $UserName est dans CN=Users au lieu de OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name).
+La GPO ne s'applique pas car l'utilisateur n'est pas dans le périmètre.
+
+DIAGNOSTIC :
+1. Ouvrir dsa.msc (Utilisateurs et ordinateurs Active Directory)
+2. Rechercher $UserName (Ctrl+F)
+3. Observer qu'il est dans CN=Users et non dans l'OU Comptabilite
+4. gpresult ne montrera PAS la GPO dans les GPO appliquées
+
+SOLUTION :
+Déplacer $UserName de CN=Users vers OU=Comptabilite,OU=Utilisateurs,$($ouRacine.Name)
+Commande PowerShell : 
+  `$user = Get-ADUser -Identity $UserName
+  Move-ADObject -Identity `$user.DistinguishedName -TargetPath "OU=Comptabilite,OU=Utilisateurs,$($ouRacine.DistinguishedName)"
+
+Ou via GUI : Clic droit → Déplacer → Naviguer jusqu'à OU=Comptabilite
+
+═══════════════════════════════════════════════════════════
+
+🐛 BUG 2 : LIEN GPO DÉSACTIVÉ
+
+SYMPTÔME :
+Le lien GPO est désactivé (icône grisée dans GPMC).
+Même si l'utilisateur est dans la bonne OU, la GPO ne s'appliquera jamais.
+
+DIAGNOSTIC :
+1. Ouvrir GPMC (gpmc.msc)
+2. Naviguer vers $($domain.DNSRoot) → $($ouRacine.Name) → OU=Utilisateurs → OU=Comptabilite
+3. Observer que le lien GPO_Compta_Restrictions apparaît GRISÉ
+4. Vérifier l'état du lien (case "Lien activé" décochée)
+
+SOLUTION :
+Activer le lien dans GPMC
+Commande PowerShell :
+  Set-GPLink -Guid (Get-GPO -Name "$GPOName").Id -Target "OU=Comptabilite,OU=Utilisateurs,$($ouRacine.DistinguishedName)" -LinkEnabled Yes
+
+Ou via GUI : Clic droit sur le lien → Cocher "Lien activé"
+
+═══════════════════════════════════════════════════════════
+
+🐛 BUG 3 : FILTRAGE DE SÉCURITÉ INCORRECT
+
+SYMPTÔME :
+Le filtrage de sécurité ne contient que le groupe '$GroupeTest',
+et $UserName N'EN EST PAS membre. "Utilisateurs authentifiés" a été retiré.
+Même avec lien actif et bon emplacement, la GPO sera refusée.
+
+DIAGNOSTIC :
+1. Dans GPMC, sélectionner GPO_Compta_Restrictions
+2. Onglet "Étendue" → Section "Filtrage de sécurité"
+3. Observer que seul '$GroupeTest' apparaît (pas "Utilisateurs authentifiés")
+4. Vérifier l'appartenance : Get-ADGroupMember '$GroupeTest'
+   → $UserName n'en est PAS membre
+5. gpresult montrera la GPO dans "GPO refusées" ou "GPO filtrées"
+
+SOLUTION (2 options au choix) :
+
+Option A : Ajouter $UserName au groupe '$GroupeTest'
+Commande PowerShell :
+  Add-ADGroupMember -Identity '$GroupeTest' -Members $UserName
+
+Option B : Ajouter "Utilisateurs authentifiés" au filtrage de sécurité
+Via GUI : 
+  1. GPMC → GPO_Compta_Restrictions → Onglet Étendue
+  2. Section Filtrage de sécurité → Bouton Ajouter
+  3. Taper "Utilisateurs authentifiés" → OK
+  4. S'assurer que la permission est "Lecture" + "Appliquer la stratégie de groupe"
+
+─────────────────────────────────────────────────────────
+COMMANDES DE VÉRIFICATION COMPLÈTES
+─────────────────────────────────────────────────────────
+
+# Vérifier l'emplacement de l'utilisateur
+Get-ADUser -Identity $UserName | Select-Object Name, DistinguishedName
+
+# Vérifier le lien GPO
+Get-GPLink -Target "OU=Comptabilite,OU=Utilisateurs,$($ouRacine.DistinguishedName)" | 
+    Select-Object DisplayName, Enabled, Enforced
+
+# Vérifier le filtrage de sécurité
+Get-GPPermission -Name "$GPOName" -All | 
+    Where-Object {`$_.Permission -eq "GpoApply"} | 
+    Select-Object Trustee, Permission
+
+# Vérifier l'état de la GPO
+Get-GPO -Name "$GPOName" | Select-Object DisplayName, GpoStatus
+
+# Sur le client (en tant que $UserName)
+gpupdate /force
+gpresult /h C:\rapport_$UserName.html
+gpresult /r
+
+─────────────────────────────────────────────────────────
+ORDRE DE RÉSOLUTION RECOMMANDÉ
+─────────────────────────────────────────────────────────
+
+1. Corriger l'emplacement de l'utilisateur (BUG 1)
+2. Activer le lien GPO (BUG 2)
+3. Corriger le filtrage de sécurité (BUG 3)
+4. Sur le client : gpupdate /force
+5. Fermer/rouvrir la session de $UserName
+6. Tester : le Panneau de configuration doit être bloqué
+
+═══════════════════════════════════════════════════════════
+FIN DU DOCUMENT DE RÉFÉRENCE
+═══════════════════════════════════════════════════════════
+"@
+
+$referenceContent | Out-File -FilePath $referenceFile -Encoding UTF8
+Write-Host "📄 Fichier de référence créé : $referenceFile" -ForegroundColor Cyan
+Write-Host "   (À conserver pour la correction, ne pas donner aux étudiants !)" -ForegroundColor Gray
+Write-Host ""
