@@ -311,13 +311,13 @@ $totalPoints++; if (Test-DomainDnsResolution)           { $note++ }
 
 
 
-$totalPoints += 2
+$totalPoints += 4
 $passedTests = 0
 if (Test-OUExists -OUPath $OURacine -Description "OU Racine @$DomainDns") { $passedTests++ }
 if (Test-OUExists -OUPath $OUGroupes -Description "OU Groupes") { $passedTests++ }
 if (Test-OUExists -OUPath $OUUtilisateurs -Description "OU Utilisateurs") { $passedTests++ }
-if ($passedTests -eq 3) { $note += 2 }
-elseif ($passedTests -eq 2) { $note += 1 }
+if ($passedTests -eq 3) { $note += 4 }
+elseif ($passedTests -eq 2) { $note += 2 }
 
 # =========================
 # Tests des groupes de sécurité
@@ -325,7 +325,7 @@ elseif ($passedTests -eq 2) { $note += 1 }
 
 Write-Log "`n──── Groupes de sécurité ────" "Yellow"
 
-$totalPoints += 3
+$totalPoints += 6
 $groupsOk = 0
 
 if (Test-GroupExists -GroupName "GG_RH_Responsables" -Scope "Global" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
@@ -338,9 +338,9 @@ if (Test-GroupExists -GroupName "DL_RH_CV_M" -Scope "DomainLocal" -Category "Sec
 if (Test-GroupExists -GroupName "DL_RH_Communs_M" -Scope "DomainLocal" -Category "Security" -OUPath $OUGroupes) { $groupsOk++ }
 
 # Attribution des points proportionnelle
-if ($groupsOk -eq 8) { $note += 3 }
-elseif ($groupsOk -ge 6) { $note += 2 }
-elseif ($groupsOk -ge 4) { $note += 1 }
+if ($groupsOk -eq 8) { $note += 6 }
+elseif ($groupsOk -ge 6) { $note += 4 }
+elseif ($groupsOk -ge 4) { $note += 2 }
 
 # =========================
 # Tests des utilisateurs
@@ -348,7 +348,7 @@ elseif ($groupsOk -ge 4) { $note += 1 }
 
 Write-Log "`n──── Utilisateurs ────" "Yellow"
 
-$totalPoints += 2
+$totalPoints += 4
 $usersOk = 0
 
 if (Test-UserExists -Login "mdurand" -FullName "Marie Durand" -OUPath $OUUtilisateurs) { $usersOk++ }
@@ -356,10 +356,10 @@ if (Test-UserExists -Login "jmartin" -FullName "Jacques Martin" -OUPath $OUUtili
 if (Test-UserExists -Login "sleblanc" -FullName "Sophie Leblanc" -OUPath $OUUtilisateurs) { $usersOk++ }
 if (Test-UserExists -Login "pmoreau" -FullName "Pierre Moreau" -OUPath $OUUtilisateurs) { $usersOk++ }
 
-if ($usersOk -eq 4) { $note += 2 }
-elseif ($usersOk -eq 3) { $note += 1.5 }
-elseif ($usersOk -eq 2) { $note += 1 }
-elseif ($usersOk -eq 1) { $note += 0.5 }
+if ($usersOk -eq 4) { $note += 4 }
+elseif ($usersOk -eq 3) { $note += 3 }
+elseif ($usersOk -eq 2) { $note += 2 }
+elseif ($usersOk -eq 1) { $note += 1 }
 
 # =========================
 # Tests appartenance utilisateurs → groupes
@@ -367,7 +367,7 @@ elseif ($usersOk -eq 1) { $note += 0.5 }
 
 Write-Log "`n──── Appartenance utilisateurs → groupes ────" "Yellow"
 
-$totalPoints += 2
+$totalPoints += 4
 $membershipOk = 0
 
 if (Test-UserInGroup -Login "mdurand" -GroupName "GG_RH_Responsables") { $membershipOk++ }
@@ -378,9 +378,9 @@ if (Test-UserInGroup -Login "sleblanc" -GroupName "GG_RH_Gestionnaires") { $memb
 if (Test-UserInGroup -Login "sleblanc" -GroupName "GG_RH_Tous") { $membershipOk++ }
 if (Test-UserInGroup -Login "pmoreau" -GroupName "GG_RH_Tous") { $membershipOk++ }
 
-if ($membershipOk -eq 7) { $note += 2 }
-elseif ($membershipOk -ge 5) { $note += 1.5 }
-elseif ($membershipOk -ge 3) { $note += 1 }
+if ($membershipOk -eq 7) { $note += 4 }
+elseif ($membershipOk -ge 5) { $note += 2.5 }
+elseif ($membershipOk -ge 3) { $note += 2 }
 
 # =========================
 # Tests structure de dossiers et partage
@@ -388,7 +388,7 @@ elseif ($membershipOk -ge 3) { $note += 1 }
 
 Write-Log "`n──── Structure de dossiers et partage réseau ────" "Yellow"
 
-$totalPoints += 3
+$totalPoints += 6
 $foldersOk = 0
 
 if (Test-FolderExists -Path "$CheminPartages") { $foldersOk++ }
@@ -404,9 +404,9 @@ if (Test-ShareExists -ShareName "RH$" -Path "$CheminPartages") { $foldersOk++ }
 $domainNetbios = ($DomainDns -split '\.')[0].ToUpper()
 if (Test-SharePermission -ShareName "RH$" -Identity "GG_RH_Tous" -AccessRight "Full") { $foldersOk++ }
 
-if ($foldersOk -eq 7) { $note += 3 }
-elseif ($foldersOk -ge 5) { $note += 2 }
-elseif ($foldersOk -ge 3) { $note += 1 }
+if ($foldersOk -eq 7) { $note += 6 }
+elseif ($foldersOk -ge 5) { $note += 4 }
+elseif ($foldersOk -ge 3) { $note += 2 }
 
 # =========================
 # Tests imbrication groupes (AGDLP)
@@ -414,7 +414,7 @@ elseif ($foldersOk -ge 3) { $note += 1 }
 
 Write-Log "`n──── Imbrication groupes (AGDLP) ────" "Yellow"
 
-$totalPoints += 3
+$totalPoints += 6
 $agdlpOk = 0
 
 if (Test-GroupInGroup -MemberGroup "GG_RH_Responsables" -ParentGroup "DL_RH_Contrats_M") { $agdlpOk++ }
@@ -423,10 +423,10 @@ if (Test-GroupInGroup -MemberGroup "GG_RH_Tous" -ParentGroup "DL_RH_CV_L") { $ag
 if (Test-GroupInGroup -MemberGroup "GG_RH_Responsables" -ParentGroup "DL_RH_CV_M") { $agdlpOk++ }
 if (Test-GroupInGroup -MemberGroup "GG_RH_Tous" -ParentGroup "DL_RH_Communs_M") { $agdlpOk++ }
 
-if ($agdlpOk -eq 5) { $note += 3 }
-elseif ($agdlpOk -eq 4) { $note += 2.5 }
-elseif ($agdlpOk -eq 3) { $note += 2 }
-elseif ($agdlpOk -eq 2) { $note += 1 }
+if ($agdlpOk -eq 5) { $note += 6 }
+elseif ($agdlpOk -eq 4) { $note += 5.5 }
+elseif ($agdlpOk -eq 3) { $note += 4 }
+elseif ($agdlpOk -eq 2) { $note += 2 }
 
 # =========================
 # Tests permissions NTFS (explicites)
@@ -434,7 +434,7 @@ elseif ($agdlpOk -eq 2) { $note += 1 }
 
 Write-Log "`n──── Permissions NTFS explicites ────" "Yellow"
 
-$totalPoints += 5
+$totalPoints += 10
 $ntfsOk = 0
 
 if (Test-NTFSPermission -Path "$CheminPartages\Contrats" -Identity "DL_RH_Contrats_M" -Rights "Modify") { $ntfsOk++ }
@@ -443,11 +443,11 @@ if (Test-NTFSPermission -Path "$CheminPartages\CV_Candidatures" -Identity "DL_RH
 if (Test-NTFSPermission -Path "$CheminPartages\CV_Candidatures" -Identity "DL_RH_CV_M" -Rights "Modify") { $ntfsOk++ }
 if (Test-NTFSPermission -Path "$CheminPartages\Documents_Communs" -Identity "DL_RH_Communs_M" -Rights "Modify") { $ntfsOk++ }
 
-if ($ntfsOk -eq 5) { $note += 5 }
-elseif ($ntfsOk -eq 4) { $note += 4 }
-elseif ($ntfsOk -eq 3) { $note += 3 }
-elseif ($ntfsOk -eq 2) { $note += 2 }
-elseif ($ntfsOk -eq 1) { $note += 1 }
+if ($ntfsOk -eq 5) { $note += 10 }
+elseif ($ntfsOk -eq 4) { $note += 8 }
+elseif ($ntfsOk -eq 3) { $note += 6 }
+elseif ($ntfsOk -eq 2) { $note += 4 }
+elseif ($ntfsOk -eq 1) { $note += 2 }
 
 # =========================
 # Résumé et envoi
