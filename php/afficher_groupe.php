@@ -1,64 +1,86 @@
 <?php
+// FORCER LE RECHARGEMENT - PAS DE CACHE
+header("Cache-Control: no-cache, no-store, must-revalidate");
+header("Pragma: no-cache");
+header("Expires: 0");
+
 $directory = __DIR__ . "/json_files";
 $files = glob("$directory/*.json");
 
-$groups = [];
-$data = [];
+$all_groups = [];
 
-// Lire les fichiers et organiser les données
+// ÉTAPE 1 : Organiser les fichiers par groupe
+$files_by_group = [];
+
 foreach ($files as $file) {
     $filename = basename($file, ".json");
-
     $parts = explode("-", $filename);
-
+    
     if (count($parts) >= 3) {
         $group = $parts[0];
+        
+        if (!isset($files_by_group[$group])) {
+            $files_by_group[$group] = [];
+        }
+        
+        $files_by_group[$group][] = $file;
+    }
+}
+
+// ÉTAPE 2 : Pour chaque groupe, traiter SES fichiers uniquement
+foreach ($files_by_group as $group_name => $group_files) {
+    
+    $all_groups[$group_name] = [];
+    
+    foreach ($group_files as $file) {
+        $filename = basename($file, ".json");
+        $parts = explode("-", $filename);
+        
+        if (count($parts) < 3) {
+            continue;
+        }
+        
+        $group = $parts[0];
         $nom = $parts[1];
-
-        // Regrouper tout le reste comme prénom
+        
         $prenom_raw = implode("-", array_slice($parts, 2));
-
-        // PUIS supprimer le suffixe _01, _02, etc. du prénom
         $prenom = preg_replace('/_\d+$/', '', $prenom_raw);
-
-        // Lire le contenu du fichier JSON
+        
+        if ($group !== $group_name) {
+            continue;
+        }
+        
         $log_content = file_get_contents($file);
         $json_start = strpos($log_content, "{");
-
+        
         if ($json_start === false) {
-            echo "<p style='color: red;'>⚠ Erreur : Format du fichier invalide ($file).</p>";
             continue;
         }
-
+        
         $json_data = substr($log_content, $json_start);
         $jsonContent = json_decode($json_data, true);
-
+        
         if ($jsonContent === null) {
-            echo "<p style='color: red;'>⚠ Erreur : json_decode() a échoué sur $file.</p>";
-            echo "<p>📄 Message d'erreur JSON : " . json_last_error_msg() . "</p>";
             continue;
         }
-
+        
         $note = isset($jsonContent['note']) ? $jsonContent['note'] : "N/A";
-
-        // Extraire la date de réception (première ligne du fichier)
+        
         $first_line = strtok($log_content, "\n");
         preg_match('/Reçu le : (.+)/', $first_line, $matches);
         $timestamp = isset($matches[1]) ? $matches[1] : date('Y-m-d H:i:s', filemtime($file));
-
-        // Clé unique par étudiant (groupe + nom + prénom)
-        $key = $group . "_" . $nom . "_" . $prenom;
-
-        // Stocker toutes les tentatives
-        if (!isset($groups[$group][$key])) {
-            $groups[$group][$key] = [
-                "nom" => $nom,
-                "prenom" => $prenom,
+        
+        $key = strtoupper($nom) . "_" . strtoupper($prenom);
+        
+        if (!isset($all_groups[$group_name][$key])) {
+            $all_groups[$group_name][$key] = [
+                "nom" => strtoupper($nom),
+                "prenom" => ucfirst(strtolower($prenom)),
                 "tentatives" => []
             ];
         }
-
-        $groups[$group][$key]['tentatives'][] = [
+        
+        $all_groups[$group_name][$key]['tentatives'][] = [
             "filename" => $filename,
             "note" => $note,
             "timestamp" => $timestamp,
@@ -67,33 +89,30 @@ foreach ($files as $file) {
     }
 }
 
-// Calculer les notes pondérées
-$coefficients = [2, 1, 0.5]; // Pondération décroissante
+// ÉTAPE 3 : Calculer les notes pondérées
+$coefficients = [2, 1, 0.5];
 
-foreach ($groups as $group => &$students) {
-    foreach ($students as $key => &$student) {
-        // Trier les tentatives par date
-        usort($student['tentatives'], function($a, $b) {
+foreach ($all_groups as $grp_name => $grp_students) {
+    foreach ($grp_students as $student_key => $student_info) {
+        usort($all_groups[$grp_name][$student_key]['tentatives'], function($a, $b) {
             return strtotime($a['timestamp']) - strtotime($b['timestamp']);
         });
-
-        // Calculer la note pondérée
+        
         $somme_ponderee = 0;
         $somme_coeff = 0;
-
-        foreach ($student['tentatives'] as $index => $tentative) {
-            $coeff = $coefficients[$index] ?? 0.5; // 0.5 par défaut pour tentative 3+
+        
+        foreach ($all_groups[$grp_name][$student_key]['tentatives'] as $index => $tentative) {
+            $coeff = $coefficients[$index] ?? 0.5;
             $somme_ponderee += $tentative['note'] * $coeff;
             $somme_coeff += $coeff;
         }
-
-        $student['note_finale'] = round($somme_ponderee / $somme_coeff, 2);
-        $student['nb_tentatives'] = count($student['tentatives']);
-        $student['derniere_note'] = end($student['tentatives'])['note'];
+        
+        $all_groups[$grp_name][$student_key]['note_finale'] = round($somme_ponderee / $somme_coeff, 2);
+        $all_groups[$grp_name][$student_key]['nb_tentatives'] = count($all_groups[$grp_name][$student_key]['tentatives']);
+        $all_groups[$grp_name][$student_key]['derniere_note'] = end($all_groups[$grp_name][$student_key]['tentatives'])['note'];
     }
 }
 
-// Vérifier si une sélection de groupe est faite
 $selectedGroup = isset($_GET['group']) ? $_GET['group'] : "";
 ?>
 
@@ -131,20 +150,20 @@ $selectedGroup = isset($_GET['group']) ? $_GET['group'] : "";
 
     <h1>📊 Résultats des tests GLPI</h1>
 
-    <!-- Formulaire de sélection du groupe -->
-    <form method="GET">
+    <form method="GET" action="">
         <label for="group">Sélectionnez un groupe :</label>
         <select name="group" id="group" onchange="this.form.submit()">
             <option value="">-- Choisissez --</option>
-            <?php foreach ($groups as $group => $students): ?>
-                <option value="<?= htmlspecialchars($group) ?>" <?= $selectedGroup === $group ? 'selected' : '' ?>>
-                    <?= htmlspecialchars($group) ?> (<?= count($students) ?> étudiants)
+            <?php foreach ($all_groups as $g_name => $g_data): ?>
+                <option value="<?= htmlspecialchars($g_name) ?>"
+                        <?= ($selectedGroup === $g_name) ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($g_name) ?> (<?= count($g_data) ?> étudiants)
                 </option>
             <?php endforeach; ?>
         </select>
     </form>
 
-    <?php if ($selectedGroup && isset($groups[$selectedGroup])): ?>
+    <?php if ($selectedGroup && isset($all_groups[$selectedGroup])): ?>
         <h2>Résultats pour le groupe : <?= htmlspecialchars($selectedGroup) ?></h2>
 
         <table>
@@ -160,67 +179,68 @@ $selectedGroup = isset($_GET['group']) ? $_GET['group'] : "";
             </thead>
             <tbody>
                 <?php
-                $index = 0;
-                foreach ($groups[$selectedGroup] as $student):
+                $display_index = 0;
+                foreach ($all_groups[$selectedGroup] as $stu_key => $stu_info):
                 ?>
                     <tr>
-                        <td><?= htmlspecialchars($student['nom']) ?></td>
-                        <td><?= htmlspecialchars($student['prenom']) ?></td>
+                        <td><?= htmlspecialchars($stu_info['nom']) ?></td>
+                        <td><?= htmlspecialchars($stu_info['prenom']) ?></td>
                         <td>
-                            <?= $student['nb_tentatives'] ?>
-                            <?php if ($student['nb_tentatives'] > 1): ?>
+                            <?= $stu_info['nb_tentatives'] ?>
+                            <?php if ($stu_info['nb_tentatives'] > 1): ?>
                                 <span class="badge badge-warning">Multiple</span>
                             <?php endif; ?>
                         </td>
-                        <td><?= htmlspecialchars($student['derniere_note']) ?>/20</td>
-                        <td class="note-finale"><?= $student['note_finale'] ?>/20</td>
+                        <td><?= htmlspecialchars($stu_info['derniere_note']) ?>/20</td>
+                        <td class="note-finale"><?= $stu_info['note_finale'] ?>/20</td>
                         <td>
-                            <span class="clickable" onclick="showDetails(<?= $index ?>)">
+                            <span class="clickable" onclick="showDetails(<?= $display_index ?>)">
                                 👁️ Voir les détails
                             </span>
                         </td>
                     </tr>
                     <tr>
                         <td colspan="6">
-                            <div id="details-<?= $index ?>" class="details">
-                                <h3>📝 Détails des tentatives</h3>
-                                <?php foreach ($student['tentatives'] as $num => $tentative): ?>
+                            <div id="details-<?= $display_index ?>" class="details">
+                                <h3>📝 Détails des tentatives pour <?= htmlspecialchars($stu_info['prenom']) ?> <?= htmlspecialchars($stu_info['nom']) ?></h3>
+                                <?php foreach ($stu_info['tentatives'] as $t_num => $t_data): ?>
                                     <div class="tentative">
-                                        <strong>Tentative <?= $num + 1 ?></strong>
-                                        <span class="badge badge-info"><?= $tentative['timestamp'] ?></span>
+                                        <strong>Tentative <?= $t_num + 1 ?></strong>
+                                        <span class="badge badge-info"><?= $t_data['timestamp'] ?></span>
                                         <br>
-                                        <strong>Note :</strong> <?= $tentative['note'] ?>/20
+                                        <strong>Note :</strong> <?= $t_data['note'] ?>/20
                                         <br>
-                                        <strong>Fichier :</strong> <?= htmlspecialchars($tentative['filename']) ?>.json
+                                        <strong>Fichier :</strong> <?= htmlspecialchars($t_data['filename']) ?>.json
                                         <br><br>
                                         <strong>Commentaires :</strong>
-                                        <pre><?= nl2br(htmlspecialchars($tentative['details']['commentaires'])) ?></pre>
+                                        <pre><?= nl2br(htmlspecialchars($t_data['details']['commentaires'])) ?></pre>
                                     </div>
                                 <?php endforeach; ?>
+
                                 <div style="margin-top: 15px; padding: 10px; background: #e8f5e9; border-left: 3px solid #4CAF50;">
                                     <strong>📊 Calcul de la note finale :</strong><br>
                                     <?php
-                                    $calcul = [];
-                                    foreach ($student['tentatives'] as $num => $tentative) {
-                                        $coeff = $coefficients[$num] ?? 0.5;
-                                        $calcul[] = "{$tentative['note']} × $coeff";
-                                    }
-                                    $somme_coeff = 0;
-                                    foreach ($student['tentatives'] as $num => $t) {
-                                        $somme_coeff += $coefficients[$num] ?? 0.5;
+                                    $calc_parts = [];
+                                    $calc_coeff = 0;
+                                    foreach ($stu_info['tentatives'] as $t_idx => $t_tent) {
+                                        $c = $coefficients[$t_idx] ?? 0.5;
+                                        $calc_parts[] = "{$t_tent['note']} × $c";
+                                        $calc_coeff += $c;
                                     }
                                     ?>
-                                    (<?= implode(" + ", $calcul) ?>) / <?= $somme_coeff ?> = <strong><?= $student['note_finale'] ?>>
+                                    (<?= implode(" + ", $calc_parts) ?>) / <?= number_format($calc_coeff, 1) ?> = <strong><?= $stu_info['note_finale'] ?>/20</strong>
                                 </div>
                             </div>
                         </td>
                     </tr>
                 <?php
-                    $index++;
+                    $display_index++;
                 endforeach;
                 ?>
             </tbody>
         </table>
+    <?php elseif ($selectedGroup): ?>
+        <p style="color: red;">⚠ Aucun étudiant trouvé pour le groupe sélectionné.</p>
     <?php endif; ?>
 
 </body>
