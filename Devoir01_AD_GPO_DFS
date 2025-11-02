@@ -1,0 +1,2946 @@
+cls
+# =========================
+# VÉRIFICATION PRÉALABLE : Droits administrateur
+# =========================
+$isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $isAdmin) {
+    Write-Host ""
+    Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Red
+    Write-Host "  ⚠️  AVERTISSEMENT : Droits administrateur requis" -ForegroundColor Red
+    Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Ce script nécessite des droits administrateur pour :" -ForegroundColor Yellow
+    Write-Host "  • Configurer TrustedHosts (si connexion par IP)" -ForegroundColor White
+    Write-Host "  • Établir des sessions PSRemoting" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Veuillez relancer PowerShell en tant qu'administrateur" -ForegroundColor Yellow
+    Write-Host "(Clic droit > Exécuter en tant qu'administrateur)" -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Appuyez sur Entrée pour quitter"
+    exit 1
+}
+
+# =========================
+# PARTIE 1 : En-tête, Inputs, PSRemoting et Variables
+# =========================
+
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  Script de vérification TP GPO" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# =========================
+# Inputs
+# =========================
+$Nom            = Read-Host "Entrez votre nom"
+$Prenom         = Read-Host "Entrez votre prénom"
+$Domain         = Read-Host "Entrez le nom du domaine (FQDN ex: labo.lan)"
+$ServeurDC      = Read-Host "Entrez le nom ou l'IP du contrôleur de domaine (ex: SRV-AD)"
+$LettreDisqueSup= Read-Host "Entrez la lettre du disque supplémentaire du DC (E: par défaut)"
+if (-not $LettreDisqueSup) { $LettreDisqueSup = "E:" }
+
+$NomServeurWeb  = Read-Host "Entrez le nom du serveur web (défaut: srv-web)"
+if (-not $NomServeurWeb) { $NomServeurWeb = "srv-web" }
+
+$IpServeurWeb   = Read-Host "Entrez l'IP du serveur web (ex: 192.168.62.3)"
+$NomSiteWeb     = Read-Host "Entrez le nom du site web (CNAME) (défaut: www)"
+if (-not $NomSiteWeb) { $NomSiteWeb = "www" }
+
+$NomServeurDFS01 = Read-Host "Nom du premier serveur DFS (défaut: SRV-DFS01)"
+if ([string]::IsNullOrWhiteSpace($NomServeurDFS01)) {    
+    $NomServeurDFS01 = "SRV-DFS01"
+}
+
+$NomServeurDFS02 = Read-Host "Nom du second serveur DFS (défaut: SRV-DFS02)"
+if ([string]::IsNullOrWhiteSpace($NomServeurDFS02)) {    
+    $NomServeurDFS02 = "SRV-DFS02"
+}
+
+$DataDriveDFS = Read-Host "Lettre du disque de données DFS (défaut: E:)"
+if ([string]::IsNullOrWhiteSpace($DataDriveDFS)) {
+    $DataDriveDFS = "E:"
+} else {
+    $DataDriveDFS = $DataDriveDFS.Trim().TrimEnd(':') + ":"
+}
+
+
+
+# Normalisation domaine
+$DomainDns = ([string]$Domain).Trim().TrimEnd('.')
+$DomainDN = ($DomainDns -split '\.' | ForEach-Object { "DC=$_" }) -join ','
+$DomainNetBios = ($DomainDns -split '\.')[0].ToUpper()
+
+# =========================
+# Credentials administrateur
+# =========================
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Yellow
+Write-Host "  Authentification administrateur du domaine" -ForegroundColor Yellow
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "Ces identifiants seront utilisés pour se connecter au DC via PSRemoting" -ForegroundColor Gray
+Write-Host "Format accepté : Administrateur  OU  $DomainNetBios\Administrateur" -ForegroundColor Gray
+Write-Host ""
+
+$AdminUser = Read-Host "Login administrateur (défaut: administrateur)"
+if ([string]::IsNullOrWhiteSpace($AdminUser)) {    
+    $AdminUser = "administrateur"
+}
+$AdminPassword = Read-Host "Mot de passe" -AsSecureString
+
+# Construction du credential
+if ($AdminUser -notmatch '\\|@') {
+    $AdminUser = "$DomainNetBios\$AdminUser"
+}
+
+$Credential = New-Object System.Management.Automation.PSCredential($AdminUser, $AdminPassword)
+
+# =========================
+# Test PSRemoting
+# =========================
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  Test de connexion PSRemoting vers $ServeurDC" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# Test 1 : Ping
+Write-Host "[1/3] Test de connectivité réseau (ping)..." -ForegroundColor Gray
+if (-not (Test-Connection -ComputerName $ServeurDC -Count 2 -Quiet -ErrorAction SilentlyContinue)) {
+    Write-Host "❌ ERREUR : Le serveur $ServeurDC ne répond pas au ping" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Vérifications :" -ForegroundColor Yellow
+    Write-Host "  • Le serveur DC est allumé" -ForegroundColor White
+    Write-Host "  • Le nom/IP du DC est correct" -ForegroundColor White
+    Write-Host "  • Le réseau fonctionne" -ForegroundColor White
+    Write-Host ""
+    Read-Host "Appuyez sur Entrée pour quitter"
+    exit 1
+}
+Write-Host "      ✓ Le serveur répond au ping" -ForegroundColor Green
+
+# Test 2 : Port WinRM (5985)
+Write-Host "[2/3] Test du port WinRM (5985)..." -ForegroundColor Gray
+$portTest = Test-NetConnection -ComputerName $ServeurDC -Port 5985 -WarningAction SilentlyContinue -ErrorAction SilentlyContinue -InformationLevel Quiet
+if (-not $portTest) {
+    Write-Host "❌ ERREUR : Le port WinRM (5985) n'est pas accessible sur $ServeurDC" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Yellow
+    Write-Host "  SOLUTION : Activer PSRemoting sur le DC" -ForegroundColor Yellow
+    Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Sur le serveur DC ($ServeurDC), ouvrez PowerShell en administrateur et exécutez :" -ForegroundColor White
+    Write-Host ""
+    Write-Host "    Enable-PSRemoting -Force" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Cette commande va :" -ForegroundColor Gray
+    Write-Host "  • Démarrer le service WinRM" -ForegroundColor Gray
+    Write-Host "  • Configurer les règles de pare-feu" -ForegroundColor Gray
+    Write-Host "  • Autoriser les connexions distantes" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Une fois fait, relancez ce script." -ForegroundColor Yellow
+    Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Yellow
+    Write-Host ""
+    Read-Host "Appuyez sur Entrée pour quitter"
+    exit 1
+}
+Write-Host "      ✓ Port WinRM accessible" -ForegroundColor Green
+
+# Test 3 : Authentification et création de session
+Write-Host "[3/3] Test d'authentification et création de session..." -ForegroundColor Gray
+try {
+    $DCSession = New-PSSession -ComputerName $ServeurDC -Credential $Credential -ErrorAction Stop
+    
+    # Stockage FORCÉ dans la portée globale
+    Set-Variable -Name "DCSession" -Value $DCSession -Scope Global -Force
+    
+    Write-Host "      ✓ Session PSRemoting établie avec succès" -ForegroundColor Green
+    Write-Host "        SessionID: $($DCSession.Id) | État: $($DCSession.State)" -ForegroundColor DarkGray
+} catch {
+    Write-Host "❌ ERREUR : Impossible d'établir une session PSRemoting" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Détails de l'erreur :" -ForegroundColor Yellow
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor White
+    Write-Host ""
+    
+    if ($_.Exception.Message -like "*Access is denied*" -or $_.Exception.Message -like "*Accès refusé*") {
+        Write-Host "Cause probable : Identifiants incorrects" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Vérifications :" -ForegroundColor Yellow
+        Write-Host "  • Le login est correct (ex: Administrateur ou $DomainNetBios\Administrateur)" -ForegroundColor White
+        Write-Host "  • Le mot de passe est correct" -ForegroundColor White
+        Write-Host "  • Le compte a les droits d'administrateur du domaine" -ForegroundColor White
+    } elseif ($_.Exception.Message -like "*WinRM*") {
+        Write-Host "Cause probable : Configuration WinRM incomplète" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "Sur le DC, exécutez :" -ForegroundColor Yellow
+        Write-Host "  Enable-PSRemoting -Force" -ForegroundColor Cyan
+        Write-Host "  Set-Item WSMan:\localhost\Client\TrustedHosts * -Force" -ForegroundColor Cyan
+    }
+    
+    Write-Host ""
+    Read-Host "Appuyez sur Entrée pour quitter"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "✅ Connexion PSRemoting réussie ! Démarrage des vérifications..." -ForegroundColor Green
+
+# Vérification que la variable est accessible
+Write-Host ""
+Write-Host "[DEBUG] Test de la variable globale..." -ForegroundColor DarkGray
+$testSession = Get-Variable -Name "DCSession" -Scope Global -ErrorAction SilentlyContinue
+if ($testSession -and $testSession.Value) {
+    Write-Host "[DEBUG] ✓ Variable `$global:DCSession accessible (ID: $($testSession.Value.Id))" -ForegroundColor DarkGray
+} else {
+    Write-Host "[DEBUG] ✗ PROBLÈME : Variable `$global:DCSession est NULL !" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Tentative de correction..." -ForegroundColor Yellow
+    Set-Variable -Name "DCSession" -Value $DCSession -Scope Global -Force
+    $testSession = Get-Variable -Name "DCSession" -Scope Global -ErrorAction SilentlyContinue
+    if ($testSession -and $testSession.Value) {
+        Write-Host "✓ Variable corrigée" -ForegroundColor Green
+    } else {
+        Write-Host "✗ Impossible de corriger - Le script va échouer" -ForegroundColor Red
+        Read-Host "Appuyez sur Entrée"
+        exit 1
+    }
+}
+
+Start-Sleep -Seconds 2
+Write-Host ""
+
+# =========================
+# Variables globales du TP
+# =========================
+$global:OURacine = "OU=@$DomainDns,$DomainDN"
+$global:OUGroupes = "OU=groupes,$global:OURacine"
+$global:OUUtilisateurs = "OU=utilisateurs,$global:OURacine"
+$global:OUComptabilite = "OU=Comptabilite,$global:OUUtilisateurs"
+$global:OUDirection = "OU=Direction,$global:OUUtilisateurs"
+$global:OUInformatique = "OU=Informatique,$global:OUUtilisateurs"
+$global:CheminPartages = "\\$ServeurDC\${LettreDisqueSup}$\partages"
+
+# Logs / Score
+$global:logMessages = @()
+$global:note = 0
+$global:totalPoints = 0
+
+function Write-Log([string]$Message,[string]$Color="Gray"){
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts - $Message"
+    $global:logMessages += $line
+    Write-Host $line -ForegroundColor $Color
+}
+
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+Write-Log "Correction Exercices récap AD-GPO-DFS" "Cyan"
+Write-Log " "
+Write-Log "Étudiant: $Prenom $Nom" "Cyan"
+Write-Log " "
+Write-Log "Domaine: $DomainDns" "Cyan"
+Write-Log "Contrôleur de domaine: $ServeurDC" "Cyan"
+Write-Log "Chemin dossier partagé: ${LettreDisqueSup}" "Cyan"
+Write-Log "═════════════════  DNS     ════════════════════════" "Cyan"
+Write-Log "Nom du Serveur WEB: $NomServeurWeb" "Cyan"
+write-log "IP du Serveur WEB: $IpServeurWeb" "Cyan"
+Write-Log "Alias du site web: $NomSiteWeb" "Cyan"
+Write-Log "" "cyan"
+Write-Log "═════════════════  DFS     ════════════════════════" "Cyan"
+Write-Log "Nom du serveur 1 DFS: $NomServeurDFS01" "Cyan"
+Write-Log "Nom du serveur 2 DFS: $NomServeurDFS02" "Cyan"
+Write-Log "Lettre du lecteur des dossiers DFS: $DataDriveDFS" "Cyan"
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+
+
+$confirmation = Read-Host "Les informations sont-elles correctes ? (O/N)"
+if ($confirmation -notmatch '^[OoYy]') {
+    Write-Host ""
+    Write-Host "❌ Test annulé. Relancez le script pour corriger les informations." -ForegroundColor Yellow
+    Read-Host "Appuyez sur Entrée pour quitter"
+    exit 0
+}
+
+Write-Host ""
+Write-Host "✅ Informations confirmées. Démarrage des tests..." -ForegroundColor Green
+Start-Sleep -Seconds 2
+
+# =========================
+# Fin Partie 1
+# =========================
+
+# =========================
+# Configuration des serveurs DFS
+# =========================
+Write-Host "─────────────────────────────────────────────────" -ForegroundColor Yellow
+Write-Host "Configuration des serveurs DFS" -ForegroundColor Yellow
+Write-Host "─────────────────────────────────────────────────" -ForegroundColor Yellow
+Write-Host ""
+
+
+Write-Host ""
+Write-Host "Configuration retenue :" -ForegroundColor Cyan
+Write-Host "  • Serveur DFS 1 : $NomServeurDFS01" -ForegroundColor White
+Write-Host "  • Serveur DFS 2 : $NomServeurDFS02" -ForegroundColor White
+Write-Host "  • Disque données: $DataDriveDFS" -ForegroundColor White
+Write-Host ""
+
+# Construction des FQDN si nécessaire
+if ($NomServeurDFS01 -notmatch '\.') { $NomServeurDFS01 = "$NomServeurDFS01.$DomainDns" }
+if ($NomServeurDFS02 -notmatch '\.') { $NomServeurDFS02 = "$NomServeurDFS02.$DomainDns" }
+
+# =========================
+# Établissement sessions PSRemoting vers serveurs DFS
+# =========================
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  Connexion aux serveurs DFS" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# Test connexion DFS01
+Write-Host "[DFS01] Test de connectivité vers $NomServeurDFS01..." -ForegroundColor Gray
+if (-not (Test-Connection -ComputerName $NomServeurDFS01 -Count 2 -Quiet -ErrorAction SilentlyContinue)) {
+    Write-Log "✗ Le serveur $NomServeurDFS01 ne répond pas" "Red"
+    Write-Host "Les tests DFS seront ignorés." -ForegroundColor Yellow
+    Write-Host ""
+    $global:SessionDFS01 = $null
+} else {
+    Write-Host "  ✓ Serveur accessible" -ForegroundColor Green
+    
+    try {
+        $global:SessionDFS01 = New-PSSession -ComputerName $NomServeurDFS01 -Credential $Credential -ErrorAction Stop
+        Write-Host "  ✓ Session PSRemoting établie (DFS01)" -ForegroundColor Green
+    } catch {
+        Write-Log "✗ Impossible d'établir une session vers $NomServeurDFS01" "Red"
+        Write-Host "  Erreur: $($_.Exception.Message)" -ForegroundColor Yellow
+        $global:SessionDFS01 = $null
+    }
+}
+
+# Test connexion DFS02
+Write-Host ""
+Write-Host "[DFS02] Test de connectivité vers $NomServeurDFS02..." -ForegroundColor Gray
+if (-not (Test-Connection -ComputerName $NomServeurDFS02 -Count 2 -Quiet -ErrorAction SilentlyContinue)) {
+    Write-Log "✗ Le serveur $NomServeurDFS02 ne répond pas" "Red"
+    Write-Host "Les tests de réplication DFS seront ignorés." -ForegroundColor Yellow
+    Write-Host ""
+    $global:SessionDFS02 = $null
+} else {
+    Write-Host "  ✓ Serveur accessible" -ForegroundColor Green
+    
+    try {
+        $global:SessionDFS02 = New-PSSession -ComputerName $NomServeurDFS02 -Credential $Credential -ErrorAction Stop
+        Write-Host "  ✓ Session PSRemoting établie (DFS02)" -ForegroundColor Green
+    } catch {
+        Write-Log "✗ Impossible d'établir une session vers $NomServeurDFS02" "Red"
+        Write-Host "  Erreur: $($_.Exception.Message)" -ForegroundColor Yellow
+        $global:SessionDFS02 = $null
+    }
+}
+
+Write-Host ""
+
+# =========================
+# FIN PARTIE CONNEXION REMOTE DFS01 et 2
+# =========================
+
+# =========================
+# PARTIE 0 : Vérification Installation Windows Server
+# =========================
+
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  PARTIE 0 : Vérification de l'installation de base" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# =========================
+# Fonction : Test IP statique
+# =========================
+function Test-RemoteStaticIP {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ServerName
+    )
+    
+    if (-not $Session) {
+        Write-Log "✗ [$ServerName] Session non disponible" "Red"
+        return $false
+    }
+    
+    $scriptBlock = {
+        try {
+            $networkAdapters = Get-NetIPInterface | Where-Object { 
+                $_.AddressFamily -eq "IPv4" -and 
+                $_.ConnectionState -eq "Connected" 
+            }
+            
+            $adaptersInfo = @()
+            $allStatic = $true
+            
+            foreach ($adapter in $networkAdapters) {
+                $dhcpStatus = $adapter.Dhcp
+                $ipConfig = Get-NetIPConfiguration -InterfaceIndex $adapter.InterfaceIndex
+                
+                $adaptersInfo += @{
+                    Name = $adapter.InterfaceAlias
+                    IPAddress = if ($ipConfig.IPv4Address) { $ipConfig.IPv4Address.IPAddress } else { "N/A" }
+                    IsDHCP = ($dhcpStatus -eq "Enabled")
+                }
+                
+                if ($dhcpStatus -eq "Enabled") {
+                    $allStatic = $false
+                }
+            }
+            
+            return @{
+                AllStatic = $allStatic
+                Adapters = $adaptersInfo
+            }
+        } catch {
+            return @{ AllStatic = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock
+    
+    if ($result.AllStatic) {
+        Write-Log "✓ [$ServerName] Toutes les interfaces utilisent une IP statique" "Green"
+        return $true
+    } else {
+        Write-Log "✗ [$ServerName] Au moins une interface est en DHCP" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test suffixe DNS correspond au domaine
+# =========================
+function Test-RemoteSuffixMatches {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ExpectedSuffix,
+        [string]$ServerName
+    )
+    
+    if (-not $Session) {
+        Write-Log "✗ [$ServerName] Session non disponible" "Red"
+        return $false
+    }
+    
+    $scriptBlock = {
+        param($expectedSuffix)
+        try {
+            $dnsSuffix = (Get-DnsClientGlobalSetting).SuffixSearchList
+            $primarySuffix = (Get-WmiObject Win32_ComputerSystem).Domain
+            
+            $matches = ($primarySuffix -eq $expectedSuffix) -or ($dnsSuffix -contains $expectedSuffix)
+            
+            return @{
+                Matches = $matches
+                PrimarySuffix = $primarySuffix
+                SearchList = $dnsSuffix
+            }
+        } catch {
+            return @{ Matches = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $ExpectedSuffix
+    
+    if ($result.Matches) {
+        Write-Log "✓ [$ServerName] Suffixe DNS correspond : $($result.PrimarySuffix)" "Green"
+        return $true
+    } else {
+        Write-Log "✗ [$ServerName] Suffixe DNS incorrect : attendu '$ExpectedSuffix', trouvé '$($result.PrimarySuffix)'" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test accès Internet
+# =========================
+function Test-RemoteInternetAccess {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ServerName
+    )
+    
+    if (-not $Session) {
+        Write-Log "✗ [$ServerName] Session non disponible" "Red"
+        return $false
+    }
+    
+    $scriptBlock = {
+        try {
+            $result = Test-NetConnection -ComputerName "google.com" -InformationLevel Quiet -WarningAction SilentlyContinue -ErrorAction Stop
+            return @{ HasInternet = $result }
+        } catch {
+            return @{ HasInternet = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock
+    
+    if ($result.HasInternet) {
+        Write-Log "✓ [$ServerName] Accès Internet disponible" "Green"
+        return $true
+    } else {
+        Write-Log "✗ [$ServerName] Pas d'accès Internet" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test règles pare-feu ICMP (ping)
+# =========================
+function Test-RemotePingFirewall {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ServerName
+    )
+    
+    if (-not $Session) {
+        Write-Log "✗ [$ServerName] Session non disponible" "Red"
+        return $false
+    }
+    
+    $scriptBlock = {
+        try {
+            # Vérifier règle entrante ICMPv4
+            $ruleInbound = Get-NetFirewallRule | Where-Object { 
+                $_.DisplayName -match "ICMPv4" -and 
+                $_.Direction -eq "Inbound" -and 
+                $_.Enabled -eq "True" 
+            }
+            
+            # Vérifier règle sortante ICMPv4
+            $ruleOutbound = Get-NetFirewallRule | Where-Object { 
+                $_.DisplayName -match "ICMPv4" -and 
+                $_.Direction -eq "Outbound" -and 
+                $_.Enabled -eq "True" 
+            }
+            
+            return @{
+                InboundEnabled = ($ruleInbound -ne $null)
+                OutboundEnabled = ($ruleOutbound -ne $null)
+            }
+        } catch {
+            return @{ InboundEnabled = $false; OutboundEnabled = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock
+    
+    $allOk = $true
+    
+    if ($result.InboundEnabled) {
+        Write-Log "✓ [$ServerName] Règle pare-feu ICMPv4 entrante activée" "Green"
+    } else {
+        Write-Log "✗ [$ServerName] Règle pare-feu ICMPv4 entrante non activée" "Red"
+        $allOk = $false
+    }
+    
+    if ($result.OutboundEnabled) {
+        Write-Log "✓ [$ServerName] Règle pare-feu ICMPv4 sortante activée" "Green"
+    } else {
+        Write-Log "✗ [$ServerName] Règle pare-feu ICMPv4 sortante non activée" "Red"
+        $allOk = $false
+    }
+    
+    return $allOk
+}
+
+# =========================
+# Fonction : Test activation Bureau à Distance (RDP)
+# =========================
+function Test-RemoteRDP {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ServerName
+    )
+    
+    if (-not $Session) {
+        Write-Log "✗ [$ServerName] Session non disponible" "Red"
+        return $false
+    }
+    
+    $scriptBlock = {
+        try {
+            $rdpStatus = (Get-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -ErrorAction Stop).fDenyTSConnections
+            return @{ IsEnabled = ($rdpStatus -eq 0) }
+        } catch {
+            return @{ IsEnabled = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock
+    
+    if ($result.IsEnabled) {
+        Write-Log "✓ [$ServerName] Bureau à Distance (RDP) activé" "Green"
+        return $true
+    } else {
+        Write-Log "✗ [$ServerName] Bureau à Distance (RDP) désactivé" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Lancement des tests - Serveur DC
+# =========================
+Write-Log "`n──── Tests Installation - Serveur DC ────" "Yellow"
+
+if ($global:DCSession) {
+    $global:totalPoints++
+    if (Test-RemoteStaticIP -Session $global:DCSession -ServerName "DC") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteSuffixMatches -Session $global:DCSession -ExpectedSuffix $DomainDns -ServerName "DC") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteInternetAccess -Session $global:DCSession -ServerName "DC") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemotePingFirewall -Session $global:DCSession -ServerName "DC") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteRDP -Session $global:DCSession -ServerName "DC") {
+        $global:note++
+    }
+}
+
+# =========================
+# Lancement des tests - Serveur DFS01
+# =========================
+Write-Log "`n──── Tests Installation - Serveur DFS01 ────" "Yellow"
+
+if ($global:SessionDFS01) {
+    $global:totalPoints++
+    if (Test-RemoteStaticIP -Session $global:SessionDFS01 -ServerName "DFS01") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteSuffixMatches -Session $global:SessionDFS01 -ExpectedSuffix $DomainDns -ServerName "DFS01") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteInternetAccess -Session $global:SessionDFS01 -ServerName "DFS01") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemotePingFirewall -Session $global:SessionDFS01 -ServerName "DFS01") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteRDP -Session $global:SessionDFS01 -ServerName "DFS01") {
+        $global:note++
+    }
+}
+
+# =========================
+# Lancement des tests - Serveur DFS02
+# =========================
+Write-Log "`n──── Tests Installation - Serveur DFS02 ────" "Yellow"
+
+if ($global:SessionDFS02) {
+    $global:totalPoints++
+    if (Test-RemoteStaticIP -Session $global:SessionDFS02 -ServerName "DFS02") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteSuffixMatches -Session $global:SessionDFS02 -ExpectedSuffix $DomainDns -ServerName "DFS02") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteInternetAccess -Session $global:SessionDFS02 -ServerName "DFS02") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemotePingFirewall -Session $global:SessionDFS02 -ServerName "DFS02") {
+        $global:note++
+    }
+    
+    $global:totalPoints++
+    if (Test-RemoteRDP -Session $global:SessionDFS02 -ServerName "DFS02") {
+        $global:note++
+    }
+}
+
+# =========================
+# Fin PARTIE 0 : Vérification Installation Windows Server
+# =========================
+
+# =========================
+# PARTIE 3 : Tests DNS
+# =========================
+
+Write-Log "`n──── Infrastructure DNS ────" "Yellow"
+
+# =========================
+# Fonction : Test rôle DNS installé
+# =========================
+function Test-RemoteDnsRoleInstalled {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $role = Invoke-Command -Session $Session -ScriptBlock {
+            (Get-WindowsFeature -Name "DNS").Installed
+        }
+        
+        if ($role) { Write-Log "[OK] Le rôle DNS est installé sur le DC." "Green" } 
+        else { Write-Log "[ERREUR] Le rôle DNS n'est pas installé sur le DC." "Red" }
+        return $role
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le rôle DNS : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test zone de recherche directe
+# =========================
+function Test-RemotePrimaryForwardZone {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ZoneName
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($zone)
+            $z = Get-DnsServerZone -Name $zone -ErrorAction SilentlyContinue
+            if ($z -and $z.ZoneType -eq 'Primary') {
+                return @{ Exists = $true; Type = $z.ZoneType }
+            }
+            return @{ Exists = $false }
+        } -ArgumentList $ZoneName
+        
+        if ($result.Exists) {
+            Write-Log "[OK] La ZRD '$ZoneName' (principale) existe." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] La ZRD '$ZoneName' est absente ou n'est pas principale." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier la ZRD : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test zone de recherche inverse
+# =========================
+function Test-RemoteReverseZoneExists {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $zones = Get-DnsServerZone -ErrorAction SilentlyContinue | Where-Object { $_.IsReverseLookupZone -eq $true }
+            return [bool]$zones
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Une zone de recherche inverse (ZRI) est configurée." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Aucune ZRI configurée." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier les ZRI : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test enregistrement A
+# =========================
+function Test-RemoteRecordAExact {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Zone,
+        [string]$HostName,
+        [string]$Ip
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($z, $h, $ip)
+            $r = Get-DnsServerResourceRecord -ZoneName $z -Name $h -RRType 'A' -ErrorAction SilentlyContinue
+            if ($r -and ($r.RecordData.IPv4Address.IPAddressToString -eq $ip)) {
+                return $true
+            }
+            return $false
+        } -ArgumentList $Zone, $HostName, $Ip
+        
+        if ($result) {
+            Write-Log "[OK] Enregistrement A '$HostName' = $Ip présent." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Enregistrement A '$HostName' ($Ip) absent/incorrect." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier l'enregistrement A : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test enregistrement CNAME
+# =========================
+function Test-RemoteRecordCnameExact {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Zone,
+        [string]$Alias,
+        [string]$TargetHost
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($z, $a, $t)
+            $r = Get-DnsServerResourceRecord -ZoneName $z -Name $a -RRType 'CNAME' -ErrorAction SilentlyContinue
+            $expected = "$t.$z."
+            if ($r -and ($r.RecordData.HostNameAlias -ieq $expected)) {
+                return $true
+            }
+            return $false
+        } -ArgumentList $Zone, $Alias, $TargetHost
+        
+        if ($result) {
+            Write-Log "[OK] CNAME '$Alias' -> '$TargetHost' présent." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] CNAME '$Alias' -> '$TargetHost' absent/incorrect." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le CNAME : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test redirecteur 8.8.8.8
+# =========================
+function Test-RemoteForwarder8888 {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $fwds = (Get-DnsServerForwarder -ErrorAction SilentlyContinue).IPAddress.IPAddressToString
+            return ($fwds -contains '8.8.8.8')
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Redirecteur 8.8.8.8 configuré." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Redirecteur 8.8.8.8 absent." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier les redirecteurs : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Lancement des tests DNS
+# =========================
+$global:totalPoints++; if (Test-RemoteDnsRoleInstalled -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemotePrimaryForwardZone -Session $global:DCSession -ZoneName $DomainDns) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteReverseZoneExists -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteRecordAExact -Session $global:DCSession -Zone $DomainDns -HostName $NomServeurWeb -Ip $IpServeurWeb) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteRecordCnameExact -Session $global:DCSession -Zone $DomainDns -Alias $NomSiteWeb -TargetHost $NomServeurWeb) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteForwarder8888 -Session $global:DCSession) { $global:note++ }
+
+# =========================
+# Fin des tests DNS
+# =========================
+
+
+# =========================
+# PARTIE 4 : Tests AD DS
+# =========================
+
+Write-Log "`n──── Infrastructure AD DS ────" "Yellow"
+
+# =========================
+# Fonction : Test rôle AD DS installé
+# =========================
+function Test-RemoteAdRoleInstalled {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $role = Invoke-Command -Session $Session -ScriptBlock {
+            (Get-WindowsFeature -Name AD-Domain-Services).Installed
+        }
+        
+        if ($role) { Write-Log "[OK] Rôle AD DS installé sur le DC." "Green" } 
+        else { Write-Log "[ERREUR] Rôle AD DS non installé sur le DC." "Red" }
+        return $role
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le rôle AD DS : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test serveur est DC
+# =========================
+function Test-RemoteIsDomainController {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $role = (Get-WmiObject Win32_ComputerSystem).DomainRole
+            return ($role -eq 5)
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Le serveur est un contrôleur de domaine (DC)." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Le serveur n'est pas promu en DC." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le rôle DC : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test service NTDS
+# =========================
+function Test-RemoteNTDSRunning {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $svc = Get-Service -Name NTDS -ErrorAction SilentlyContinue
+            return ($svc -and $svc.Status -eq "Running")
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Service NTDS actif." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Service NTDS inactif." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le service NTDS : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test forêt AD
+# =========================
+function Test-RemoteForest {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $f = Get-ADForest -ErrorAction Stop
+            return @{ Exists = $true; Name = $f.Name }
+        }
+        
+        if ($result.Exists) {
+            Write-Log "[OK] Forêt détectée : $($result.Name)." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Aucune forêt AD détectée." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier la forêt : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test rôles FSMO
+# =========================
+function Test-RemoteFSMO {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $fsmo = netdom query fsmo 2>$null | ForEach-Object { $_ -replace "\s+", " " }
+            return [bool]$fsmo
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Rôles FSMO attribués." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Impossible de récupérer les rôles FSMO." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Test FSMO échoué : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test résolution DNS du domaine
+# =========================
+function Test-RemoteDomainDnsResolution {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $dn = (Get-ADDomain -ErrorAction Stop).DNSRoot
+            $resolve = Resolve-DnsName -Name $dn -Server 127.0.0.1 -ErrorAction SilentlyContinue
+            return @{ Success = [bool]$resolve; Domain = $dn }
+        }
+        
+        if ($result.Success) {
+            Write-Log "[OK] Résolution DNS du domaine '$($result.Domain)' OK." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Problème de résolution DNS pour '$($result.Domain)'." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de tester la résolution DNS : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test NTDS et SYSVOL sur disque supplémentaire
+# =========================
+function Test-RemoteNtdsSysvolOnDataDrive {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$DataDrive
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    if (-not $DataDrive) { 
+        Write-Log "[ERREUR] Lettre de lecteur non fournie." "Red"
+        return $false 
+    }
+    
+    $drv = $DataDrive.Trim()
+    if ($drv -notmatch '^[A-Za-z]:$') { 
+        Write-Log "[ERREUR] Lettre de lecteur invalide '$DataDrive'." "Red"
+        return $false 
+    }
+    
+    if ($drv -ieq 'C:') { 
+        Write-Log "[ERREUR] Le lecteur supplémentaire ne peut pas être C:." "Red"
+        return $false 
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($drive)
+            
+            # Récupération chemins NTDS et SYSVOL
+            try {
+                $ntdsReg = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -ErrorAction Stop
+                $ntdsPath = $ntdsReg.'DSA Working Directory'
+            } catch {
+                $ntdsPath = (Join-Path "$drive\" 'Windows\NTDS')
+            }
+            
+            try {
+                $nl = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -ErrorAction Stop
+                $sysvolPath = $nl.'SysVol'
+            } catch {
+                $sysvolPath = (Join-Path "$drive\" 'Windows\SYSVOL')
+            }
+            
+            # Extraction lettre de lecteur
+            function Get-Drive([string]$p) { 
+                try { 
+                    return ([System.IO.Path]::GetPathRoot($p)).TrimEnd('\') 
+                } catch { 
+                    return $null 
+                } 
+            }
+            
+            $ntdsDrive = Get-Drive $ntdsPath
+            $sysvolDrive = Get-Drive $sysvolPath
+            
+            $okNtds = ($ntdsDrive -and ($ntdsDrive -ne 'C:') -and ($ntdsDrive -ieq $drive))
+            $okSysvol = ($sysvolDrive -and ($sysvolDrive -ne 'C:') -and ($sysvolDrive -ieq $drive))
+            
+            return @{
+                OkNtds = $okNtds
+                OkSysvol = $okSysvol
+                NtdsPath = $ntdsPath
+                SysvolPath = $sysvolPath
+            }
+        } -ArgumentList $drv
+        
+        if ($result.OkNtds -and $result.OkSysvol) {
+            Write-Log "[OK] NTDS et SYSVOL sont sur $drv (hors C:)." "Green"
+            return $true
+        }
+        
+        if (-not $result.OkNtds) { 
+            Write-Log "[ERREUR] NTDS sur '$($result.NtdsPath)' – attendu sur $drv* (≠ C:)." "Red" 
+        }
+        if (-not $result.OkSysvol) { 
+            Write-Log "[ERREUR] SYSVOL sur '$($result.SysvolPath)' – attendu sur $drv* (≠ C:)." "Red" 
+        }
+        return $false
+        
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier NTDS/SYSVOL : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Lancement des tests AD DS
+# =========================
+$global:totalPoints++; if (Test-RemoteAdRoleInstalled -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteIsDomainController -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNTDSRunning -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteForest -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteFSMO -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteDomainDnsResolution -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNtdsSysvolOnDataDrive -Session $global:DCSession -DataDrive $LettreDisqueSup) { $global:note++ }
+
+# =========================
+# Fin des tests AD DS
+# =========================
+
+# =========================
+# PARTIE 5 : Tests DHCP
+# =========================
+
+Write-Log "`n──── Infrastructure DHCP ────" "Yellow"
+
+# =========================
+# Fonction : Test rôle DHCP installé
+# =========================
+function Test-RemoteDhcpRoleInstalled {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $role = Invoke-Command -Session $Session -ScriptBlock {
+            (Get-WindowsFeature -Name DHCP).Installed
+        }
+        
+        if ($role) { Write-Log "[OK] Rôle DHCP installé sur le DC." "Green" } 
+        else { Write-Log "[ERREUR] Rôle DHCP non installé sur le DC." "Red" }
+        return $role
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le rôle DHCP : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test service DHCP actif
+# =========================
+function Test-RemoteDhcpServiceRunning {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $svc = Get-Service -Name DHCPServer -ErrorAction SilentlyContinue
+            return ($svc -and $svc.Status -eq "Running")
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Service DHCP actif." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Service DHCP inactif." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le service DHCP : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test DHCP autorisé dans AD
+# =========================
+function Test-RemoteDhcpAuthorized {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $authorized = Get-DhcpServerInDC -ErrorAction SilentlyContinue
+            return [bool]$authorized
+        }
+        
+        if ($result) {
+            Write-Log "[OK] Serveur DHCP autorisé dans AD." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Serveur DHCP non autorisé dans AD." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier l'autorisation DHCP : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test étendue DHCP existe
+# =========================
+function Test-RemoteDhcpScopeExists {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            $scopes = @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)
+            if ($scopes -and $scopes.Count -gt 0) {
+                $scope = $scopes[0]
+                return @{ 
+                    Exists = $true
+                    Name = $scope.Name
+                    ScopeId = $scope.ScopeId.ToString()
+                    StartRange = $scope.StartRange.ToString()
+                    EndRange = $scope.EndRange.ToString()
+                }
+            }
+            return @{ Exists = $false }
+        }
+        
+        if ($result.Exists) {
+            Write-Log "[OK] Étendue DHCP configurée : $($result.Name) ($($result.ScopeId)) [$($result.StartRange) - $($result.EndRange)]." "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Aucune étendue DHCP configurée." "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier les étendues DHCP : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test options DHCP (Router + DNS)
+# =========================
+function Test-RemoteDhcpOptions {
+    param([System.Management.Automation.Runspaces.PSSession]$Session)
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            # Essayer de récupérer les options au niveau de l'étendue
+            $scopes = @(Get-DhcpServerv4Scope -ErrorAction SilentlyContinue)
+            
+            $hasRouter = $false
+            $hasDns = $false
+            $routerValue = $null
+            $dnsValue = $null
+            
+            if ($scopes -and $scopes.Count -gt 0) {
+                $scopeId = $scopes[0].ScopeId
+                
+                # Options au niveau de l'étendue
+                $scopeOptions = Get-DhcpServerv4OptionValue -ScopeId $scopeId -ErrorAction SilentlyContinue
+                
+                if ($scopeOptions) {
+                    $router = $scopeOptions | Where-Object { $_.OptionId -eq 3 }
+                    $dns = $scopeOptions | Where-Object { $_.OptionId -eq 6 }
+                    
+                    if ($router) {
+                        $hasRouter = $true
+                        $routerValue = $router.Value -join ', '
+                    }
+                    
+                    if ($dns) {
+                        $hasDns = $true
+                        $dnsValue = $dns.Value -join ', '
+                    }
+                }
+            }
+            
+            # Si non trouvées au niveau étendue, vérifier au niveau serveur
+            if (-not $hasRouter -or -not $hasDns) {
+                $serverOptions = Get-DhcpServerv4OptionValue -ErrorAction SilentlyContinue
+                
+                if ($serverOptions) {
+                    if (-not $hasRouter) {
+                        $router = $serverOptions | Where-Object { $_.OptionId -eq 3 }
+                        if ($router) {
+                            $hasRouter = $true
+                            $routerValue = $router.Value -join ', '
+                        }
+                    }
+                    
+                    if (-not $hasDns) {
+                        $dns = $serverOptions | Where-Object { $_.OptionId -eq 6 }
+                        if ($dns) {
+                            $hasDns = $true
+                            $dnsValue = $dns.Value -join ', '
+                        }
+                    }
+                }
+            }
+            
+            return @{
+                HasRouter = $hasRouter
+                HasDns = $hasDns
+                RouterValue = $routerValue
+                DnsValue = $dnsValue
+            }
+        }
+        
+        $allOk = $true
+        
+        if ($result.HasRouter) {
+            Write-Log "[OK] Option 003 (Router) configurée : $($result.RouterValue)." "Green"
+        } else {
+            Write-Log "[ERREUR] Option 003 (Router) absente." "Red"
+            $allOk = $false
+        }
+        
+        if ($result.HasDns) {
+            Write-Log "[OK] Option 006 (DNS Server) configurée : $($result.DnsValue)." "Green"
+        } else {
+            Write-Log "[ERREUR] Option 006 (DNS Server) absente." "Red"
+            $allOk = $false
+        }
+        
+        return $allOk
+        
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier les options DHCP : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Lancement des tests DHCP
+# =========================
+$global:totalPoints++; if (Test-RemoteDhcpRoleInstalled -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteDhcpServiceRunning -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteDhcpAuthorized -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteDhcpScopeExists -Session $global:DCSession) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteDhcpOptions -Session $global:DCSession) { $global:note++ }
+
+
+# =========================
+# Fin PArtie 5 des tests DHCP
+# =========================
+
+# =========================
+# PARTIE 6 : Tests Structure AD
+# =========================
+
+Write-Log "`n──── Structure AD (OU) ────" "Yellow"
+
+# =========================
+# Fonction : Test OU existe
+# =========================
+function Test-RemoteOUExists {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$OUPath,
+        [string]$Description
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($path)
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $ou = Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$path'" -ErrorAction SilentlyContinue
+            return [bool]$ou
+        } -ArgumentList $OUPath
+        
+        if ($result) {
+            Write-Log "[OK] OU '$Description' existe : $OUPath" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] OU '$Description' absente : $OUPath" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier l'OU '$Description' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test utilisateur existe
+# =========================
+function Test-RemoteUserExists {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Login,
+        [string]$OUPath
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($login, $ou)
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $user = Get-ADUser -Filter "SamAccountName -eq '$login'" -SearchBase $ou -Properties Enabled -ErrorAction SilentlyContinue
+            if ($user) {
+                return @{ Exists = $true; Enabled = $user.Enabled }
+            }
+            return @{ Exists = $false }
+        } -ArgumentList $Login, $OUPath
+        
+        if ($result.Exists) {
+            if ($result.Enabled) {
+                Write-Log "[OK] Utilisateur '$Login' existe et est activé dans $OUPath" "Green"
+                return $true
+            } else {
+                Write-Log "[ERREUR] Utilisateur '$Login' existe mais est DÉSACTIVÉ" "Red"
+                return $false
+            }
+        } else {
+            Write-Log "[ERREUR] Utilisateur '$Login' absent dans $OUPath" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier l'utilisateur '$Login' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test groupe existe
+# =========================
+function Test-RemoteGroupExists {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$GroupName,
+        [string]$Scope,
+        [string]$Category,
+        [string]$OUPath
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($name, $scope, $cat, $ou)
+            Import-Module ActiveDirectory -ErrorAction Stop
+            $group = Get-ADGroup -Filter "Name -eq '$name'" -SearchBase $ou -Properties GroupScope,GroupCategory -ErrorAction SilentlyContinue
+            
+            if ($group) {
+                # Conversion des énumérations en chaînes
+                $scopeStr = $group.GroupScope.ToString()
+                $catStr = $group.GroupCategory.ToString()
+                
+                return @{
+                    Exists = $true
+                    Scope = $scopeStr
+                    Category = $catStr
+                }
+            }
+            return @{ Exists = $false }
+        } -ArgumentList $GroupName, $Scope, $Category, $OUPath
+        
+        if (-not $result.Exists) {
+            Write-Log "[ERREUR] Groupe '$GroupName' absent dans $OUPath" "Red"
+            return $false
+        }
+        
+        $scopeOk = ($result.Scope -eq $Scope)
+        $catOk = ($result.Category -eq $Category)
+        
+        if ($scopeOk -and $catOk) {
+            Write-Log "[OK] Groupe '$GroupName' ($Scope, $Category) existe" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Groupe '$GroupName' : Scope=$($result.Scope) (attendu $Scope), Category=$($result.Category) (attendu $Category)" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le groupe '$GroupName' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test utilisateur dans groupe
+# =========================
+function Test-RemoteUserInGroup {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Login,
+        [string]$GroupName
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($login, $group)
+            Import-Module ActiveDirectory -ErrorAction Stop
+            
+            $user = Get-ADUser -Filter "SamAccountName -eq '$login'" -ErrorAction SilentlyContinue
+            if (-not $user) { return @{ IsMember = $false; Error = "Utilisateur introuvable" } }
+            
+            $members = Get-ADGroupMember -Identity $group -ErrorAction SilentlyContinue
+            $isMember = $members | Where-Object { $_.SamAccountName -eq $login }
+            
+            return @{ IsMember = [bool]$isMember }
+        } -ArgumentList $Login, $GroupName
+        
+        if ($result.IsMember) {
+            Write-Log "[OK] '$Login' est membre de '$GroupName'" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] '$Login' n'est PAS membre de '$GroupName'" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier l'appartenance de '$Login' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test groupe dans groupe
+# =========================
+function Test-RemoteGroupInGroup {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$MemberGroup,
+        [string]$ParentGroup
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($member, $parent)
+            Import-Module ActiveDirectory -ErrorAction Stop
+            
+            $memberGrp = Get-ADGroup -Filter "Name -eq '$member'" -ErrorAction SilentlyContinue
+            if (-not $memberGrp) { return @{ IsMember = $false; Error = "Groupe membre introuvable" } }
+            
+            $members = Get-ADGroupMember -Identity $parent -ErrorAction SilentlyContinue
+            $isMember = $members | Where-Object { $_.Name -eq $member }
+            
+            return @{ IsMember = [bool]$isMember }
+        } -ArgumentList $MemberGroup, $ParentGroup
+        
+        if ($result.IsMember) {
+            Write-Log "[OK] Groupe '$MemberGroup' est membre de '$ParentGroup'" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Groupe '$MemberGroup' n'est PAS membre de '$ParentGroup'" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier l'imbrication '$MemberGroup' -> '$ParentGroup' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Lancement des tests - OU
+# =========================
+$global:totalPoints++; if (Test-RemoteOUExists -Session $global:DCSession -OUPath $global:OURacine -Description "OU Racine") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteOUExists -Session $global:DCSession -OUPath $global:OUGroupes -Description "OU Groupes") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteOUExists -Session $global:DCSession -OUPath $global:OUUtilisateurs -Description "OU Utilisateurs") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteOUExists -Session $global:DCSession -OUPath $global:OUComptabilite -Description "OU Comptabilite") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteOUExists -Session $global:DCSession -OUPath $global:OUDirection -Description "OU Direction") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteOUExists -Session $global:DCSession -OUPath $global:OUInformatique -Description "OU Informatique") { $global:note++ }
+
+# =========================
+# Lancement des tests - Utilisateurs
+# =========================
+Write-Log "`n──── Utilisateurs ────" "Yellow"
+
+$global:totalPoints++; if (Test-RemoteUserExists -Session $global:DCSession -Login "compta01" -OUPath $global:OUComptabilite) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteUserExists -Session $global:DCSession -Login "direction01" -OUPath $global:OUDirection) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteUserExists -Session $global:DCSession -Login "IT01" -OUPath $global:OUInformatique) { $global:note++ }
+
+# =========================
+# Lancement des tests - Groupes Globaux
+# =========================
+Write-Log "`n──── Groupes Globaux ────" "Yellow"
+
+$global:totalPoints++; if (Test-RemoteGroupExists -Session $global:DCSession -GroupName "G_Comptabilite" -Scope "Global" -Category "Security" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteGroupExists -Session $global:DCSession -GroupName "G_Direction" -Scope "Global" -Category "Security" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-RemoteGroupExists -Session $global:DCSession -GroupName "G_Informatique" -Scope "Global" -Category "Security" -OUPath $global:OUGroupes) { $global:note++ }
+
+# =========================
+# Lancement des tests - Groupes Domain Local (2 formats acceptés)
+# =========================
+Write-Log "`n──── Groupes Domain Local (accepte 2 formats) ────" "Yellow"
+
+function Test-DLGroupBothFormats {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Format1,
+        [string]$Format2,
+        [string]$OUPath
+    )
+    
+    # Vérifier quel format existe (sans afficher d'erreur immédiatement)
+    $result1 = Invoke-Command -Session $Session -ScriptBlock {
+        param($name, $ou)
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $group = Get-ADGroup -Filter "Name -eq '$name'" -SearchBase $ou -Properties GroupScope,GroupCategory -ErrorAction SilentlyContinue
+        if ($group) {
+            return @{
+                Exists = $true
+                Scope = $group.GroupScope.ToString()
+                Category = $group.GroupCategory.ToString()
+            }
+        }
+        return @{ Exists = $false }
+    } -ArgumentList $Format1, $OUPath -ErrorAction SilentlyContinue
+    
+    if ($result1.Exists) {
+        # Format1 existe, vérifier les propriétés
+        if ($result1.Scope -eq "DomainLocal" -and $result1.Category -eq "Security") {
+            Write-Log "[OK] Groupe '$Format1' (DomainLocal, Security) existe" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Groupe '$Format1' : Scope=$($result1.Scope) (attendu DomainLocal), Category=$($result1.Category) (attendu Security)" "Red"
+            return $false
+        }
+    }
+    
+    # Format1 absent, tester Format2
+    $result2 = Invoke-Command -Session $Session -ScriptBlock {
+        param($name, $ou)
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $group = Get-ADGroup -Filter "Name -eq '$name'" -SearchBase $ou -Properties GroupScope,GroupCategory -ErrorAction SilentlyContinue
+        if ($group) {
+            return @{
+                Exists = $true
+                Scope = $group.GroupScope.ToString()
+                Category = $group.GroupCategory.ToString()
+            }
+        }
+        return @{ Exists = $false }
+    } -ArgumentList $Format2, $OUPath -ErrorAction SilentlyContinue
+    
+    if ($result2.Exists) {
+        # Format2 existe, vérifier les propriétés
+        if ($result2.Scope -eq "DomainLocal" -and $result2.Category -eq "Security") {
+            Write-Log "[OK] Groupe '$Format2' (DomainLocal, Security) existe" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Groupe '$Format2' : Scope=$($result2.Scope) (attendu DomainLocal), Category=$($result2.Category) (attendu Security)" "Red"
+            return $false
+        }
+    }
+    
+    # Aucun des deux formats n'existe
+    Write-Log "[ERREUR] Groupe '$Format1' OU '$Format2' absent dans $OUPath" "Red"
+    return $false
+}
+
+$global:totalPoints++; if (Test-DLGroupBothFormats -Session $global:DCSession -Format1 "DL_Commun_F" -Format2 "DL_Commun_Full" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-DLGroupBothFormats -Session $global:DCSession -Format1 "DL_Comptabilite_F" -Format2 "DL_Comptabilite_Full" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-DLGroupBothFormats -Session $global:DCSession -Format1 "DL_Comptabilite_R" -Format2 "DL_Comptabilite_Read" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-DLGroupBothFormats -Session $global:DCSession -Format1 "DL_Direction_F" -Format2 "DL_Direction_Full" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-DLGroupBothFormats -Session $global:DCSession -Format1 "DL_Informatique_F" -Format2 "DL_Informatique_Full" -OUPath $global:OUGroupes) { $global:note++ }
+$global:totalPoints++; if (Test-DLGroupBothFormats -Session $global:DCSession -Format1 "DL_Informatique_R" -Format2 "DL_Informatique_Read" -OUPath $global:OUGroupes) { $global:note++ }
+
+# =========================
+# Lancement des tests - Appartenance utilisateurs
+# =========================
+Write-Log "`n──── Appartenance utilisateurs → groupes globaux ────" "Yellow"
+
+$global:totalPoints++; if (Test-RemoteUserInGroup -Session $global:DCSession -Login "compta01" -GroupName "G_Comptabilite") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteUserInGroup -Session $global:DCSession -Login "direction01" -GroupName "G_Direction") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteUserInGroup -Session $global:DCSession -Login "IT01" -GroupName "G_Informatique") { $global:note++ }
+
+# =========================
+# Lancement des tests - Imbrication AGDLP (teste les 2 formats)
+# =========================
+Write-Log "`n──── Imbrication AGDLP (teste les 2 formats) ────" "Yellow"
+
+function Test-GroupInGroupBothFormats {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$MemberGroup,
+        [string]$ParentFormat1,
+        [string]$ParentFormat2,
+        [string]$MemberGroupAlt = $null  # Nom alternatif du groupe membre (pour Domain Users / Utilisateurs du domaine)
+    )
+    
+    # Vérifier quel format du groupe parent existe
+    $parentExists1 = Invoke-Command -Session $Session -ScriptBlock {
+        param($name)
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $group = Get-ADGroup -Filter "Name -eq '$name'" -ErrorAction SilentlyContinue
+        return [bool]$group
+    } -ArgumentList $ParentFormat1 -ErrorAction SilentlyContinue
+    
+    $parentExists2 = Invoke-Command -Session $Session -ScriptBlock {
+        param($name)
+        Import-Module ActiveDirectory -ErrorAction Stop
+        $group = Get-ADGroup -Filter "Name -eq '$name'" -ErrorAction SilentlyContinue
+        return [bool]$group
+    } -ArgumentList $ParentFormat2 -ErrorAction SilentlyContinue
+    
+    # Déterminer quel parent utiliser
+    $parentToUse = $null
+    if ($parentExists1) {
+        $parentToUse = $ParentFormat1
+    } elseif ($parentExists2) {
+        $parentToUse = $ParentFormat2
+    } else {
+        Write-Log "[ERREUR] Groupe parent '$ParentFormat1' OU '$ParentFormat2' introuvable" "Red"
+        return $false
+    }
+    
+    # Tester SILENCIEUSEMENT les 2 noms possibles du groupe membre
+    $memberFound = $null
+    
+    # Test 1 : Groupe membre principal
+    $result1 = Invoke-Command -Session $Session -ScriptBlock {
+        param($member, $parent)
+        Import-Module ActiveDirectory -ErrorAction Stop
+        
+        $memberGrp = Get-ADGroup -Filter "Name -eq '$member'" -ErrorAction SilentlyContinue
+        if (-not $memberGrp) { return @{ IsMember = $false; Error = "Groupe membre introuvable" } }
+        
+        $members = Get-ADGroupMember -Identity $parent -ErrorAction SilentlyContinue
+        $isMember = $members | Where-Object { $_.Name -eq $member }
+        
+        return @{ IsMember = [bool]$isMember }
+    } -ArgumentList $MemberGroup, $parentToUse -ErrorAction SilentlyContinue
+    
+    if ($result1.IsMember) {
+        $memberFound = $MemberGroup
+    }
+    
+    # Test 2 : Si échec ET qu'il y a un nom alternatif
+    if (-not $memberFound -and $MemberGroupAlt) {
+        $result2 = Invoke-Command -Session $Session -ScriptBlock {
+            param($member, $parent)
+            Import-Module ActiveDirectory -ErrorAction Stop
+            
+            $memberGrp = Get-ADGroup -Filter "Name -eq '$member'" -ErrorAction SilentlyContinue
+            if (-not $memberGrp) { return @{ IsMember = $false; Error = "Groupe membre introuvable" } }
+            
+            $members = Get-ADGroupMember -Identity $parent -ErrorAction SilentlyContinue
+            $isMember = $members | Where-Object { $_.Name -eq $member }
+            
+            return @{ IsMember = [bool]$isMember }
+        } -ArgumentList $MemberGroupAlt, $parentToUse -ErrorAction SilentlyContinue
+        
+        if ($result2.IsMember) {
+            $memberFound = $MemberGroupAlt
+        }
+    }
+    
+    # Afficher UN SEUL message final
+    if ($memberFound) {
+        Write-Log "[OK] Groupe '$memberFound' est membre de '$parentToUse'" "Green"
+        return $true
+    } else {
+        if ($MemberGroupAlt) {
+            Write-Log "[ERREUR] Groupe '$MemberGroup' OU '$MemberGroupAlt' n'est PAS membre de '$parentToUse'" "Red"
+        } else {
+            Write-Log "[ERREUR] Groupe '$MemberGroup' n'est PAS membre de '$parentToUse'" "Red"
+        }
+        return $false
+    }
+}
+
+# "Domain Users" (OU "Utilisateurs du domaine") → DL_Commun_Full et DL_Informatique_R
+$global:totalPoints++; if (Test-GroupInGroupBothFormats -Session $global:DCSession -MemberGroup "Domain Users" -MemberGroupAlt "Utilisateurs du domaine" -ParentFormat1 "DL_Commun_F" -ParentFormat2 "DL_Commun_Full") { $global:note++ }
+$global:totalPoints++; if (Test-GroupInGroupBothFormats -Session $global:DCSession -MemberGroup "Domain Users" -MemberGroupAlt "Utilisateurs du domaine" -ParentFormat1 "DL_Informatique_R" -ParentFormat2 "DL_Informatique_Read") { $global:note++ }
+
+# Groupes globaux → DL
+$global:totalPoints++; if (Test-GroupInGroupBothFormats -Session $global:DCSession -MemberGroup "G_Comptabilite" -ParentFormat1 "DL_Comptabilite_F" -ParentFormat2 "DL_Comptabilite_Full") { $global:note++ }
+$global:totalPoints++; if (Test-GroupInGroupBothFormats -Session $global:DCSession -MemberGroup "G_Direction" -ParentFormat1 "DL_Comptabilite_R" -ParentFormat2 "DL_Comptabilite_Read") { $global:note++ }
+$global:totalPoints++; if (Test-GroupInGroupBothFormats -Session $global:DCSession -MemberGroup "G_Direction" -ParentFormat1 "DL_Direction_F" -ParentFormat2 "DL_Direction_Full") { $global:note++ }
+$global:totalPoints++; if (Test-GroupInGroupBothFormats -Session $global:DCSession -MemberGroup "G_Informatique" -ParentFormat1 "DL_Informatique_F" -ParentFormat2 "DL_Informatique_Full") { $global:note++ }
+# =========================
+# Fin PARTIE 6 : Tests Structure AD
+# =========================
+
+
+# =========================
+# PARTIE 7 : Tests Partages et NTFS
+# =========================
+
+Write-Log "`n──── Structure de dossiers ────" "Yellow"
+
+# =========================
+# Fonction : Test dossier existe (sur le DC)
+# =========================
+function Test-RemoteFolderExists {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Path
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($p)
+            Test-Path -Path $p -PathType Container
+        } -ArgumentList $Path
+        
+        if ($result) {
+            Write-Log "[OK] Dossier existe : $Path" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Dossier absent : $Path" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le dossier '$Path' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test partage réseau existe
+# =========================
+function Test-RemoteShareExists {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$ShareName,
+        [string]$ExpectedPath
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($name, $path)
+            $share = Get-SmbShare -Name $name -ErrorAction SilentlyContinue
+            
+            if ($share) {
+                $sharePath = $share.Path.TrimEnd('\')
+                $expectedPath = $path.TrimEnd('\')
+                
+                return @{
+                    Exists = $true
+                    Path = $sharePath
+                    Match = ($sharePath -ieq $expectedPath)
+                }
+            }
+            return @{ Exists = $false }
+        } -ArgumentList $ShareName, $ExpectedPath
+        
+        if (-not $result.Exists) {
+            Write-Log "[ERREUR] Partage '$ShareName' inexistant" "Red"
+            return $false
+        }
+        
+        if ($result.Match) {
+            Write-Log "[OK] Partage '$ShareName' existe et pointe vers '$ExpectedPath'" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Partage '$ShareName' pointe vers '$($result.Path)' au lieu de '$ExpectedPath'" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier le partage '$ShareName' : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test permissions NTFS (2 formats de groupes)
+# =========================
+function Test-RemoteNTFSBothFormats {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$Path,
+        [string]$Identity1,
+        [string]$Identity2,
+        [string]$Rights
+    )
+    
+    if (-not $Session -or $Session.State -ne 'Opened') {
+        Write-Log "[ERREUR] Session PSRemoting invalide" "Red"
+        return $false
+    }
+    
+    try {
+        $result = Invoke-Command -Session $Session -ScriptBlock {
+            param($p, $id1, $id2, $r)
+            
+            if (-not (Test-Path $p)) {
+                return @{ Error = "Chemin inexistant" }
+            }
+            
+            $acl = Get-Acl -Path $p
+            
+            # Chercher avec Identity1
+            $perm1 = $acl.Access | Where-Object {
+                ($_.IdentityReference -like "*\$id1" -or $_.IdentityReference -eq $id1) -and
+                $_.FileSystemRights -match $r -and
+                $_.AccessControlType -eq "Allow" -and
+                $_.IsInherited -eq $false
+            }
+            
+            if ($perm1) {
+                return @{ Found = $true; Identity = $id1 }
+            }
+            
+            # Chercher avec Identity2
+            $perm2 = $acl.Access | Where-Object {
+                ($_.IdentityReference -like "*\$id2" -or $_.IdentityReference -eq $id2) -and
+                $_.FileSystemRights -match $r -and
+                $_.AccessControlType -eq "Allow" -and
+                $_.IsInherited -eq $false
+            }
+            
+            if ($perm2) {
+                return @{ Found = $true; Identity = $id2 }
+            }
+            
+            return @{ Found = $false }
+        } -ArgumentList $Path, $Identity1, $Identity2, $Rights
+        
+        if ($result.Error) {
+            Write-Log "[ERREUR] $($result.Error) : $Path" "Red"
+            return $false
+        }
+        
+        if ($result.Found) {
+            Write-Log "[OK] Permission NTFS '$Rights' pour '$($result.Identity)' sur '$Path'" "Green"
+            return $true
+        } else {
+            Write-Log "[ERREUR] Permission NTFS '$Rights' pour '$Identity1' OU '$Identity2' absente sur '$Path'" "Red"
+            return $false
+        }
+    } catch {
+        Write-Log "[ERREUR] Impossible de vérifier les permissions NTFS : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Lancement des tests - Dossiers
+# =========================
+# Construction du chemin local sur le DC
+$localPathBase = "${LettreDisqueSup}\partages"
+
+$global:totalPoints++; if (Test-RemoteFolderExists -Session $global:DCSession -Path "$localPathBase") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteFolderExists -Session $global:DCSession -Path "$localPathBase\Commun") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteFolderExists -Session $global:DCSession -Path "$localPathBase\Comptabilite") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteFolderExists -Session $global:DCSession -Path "$localPathBase\Direction") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteFolderExists -Session $global:DCSession -Path "$localPathBase\Informatique") { $global:note++ }
+
+# =========================
+# Lancement des tests - Partages réseau
+# =========================
+Write-Log "`n──── Partages réseau ────" "Yellow"
+
+$global:totalPoints++; if (Test-RemoteShareExists -Session $global:DCSession -ShareName "Commun" -ExpectedPath "$localPathBase\Commun") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteShareExists -Session $global:DCSession -ShareName "Comptabilite" -ExpectedPath "$localPathBase\Comptabilite") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteShareExists -Session $global:DCSession -ShareName "Direction" -ExpectedPath "$localPathBase\Direction") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteShareExists -Session $global:DCSession -ShareName "Informatique" -ExpectedPath "$localPathBase\Informatique") { $global:note++ }
+
+# =========================
+# Lancement des tests - Permissions NTFS (teste les 2 formats)
+# =========================
+Write-Log "`n──── Permissions NTFS (teste les 2 formats) ────" "Yellow"
+
+$global:totalPoints++; if (Test-RemoteNTFSBothFormats -Session $global:DCSession -Path "$localPathBase\Commun" -Identity1 "DL_Commun_F" -Identity2 "DL_Commun_Full" -Rights "FullControl") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNTFSBothFormats -Session $global:DCSession -Path "$localPathBase\Comptabilite" -Identity1 "DL_Comptabilite_F" -Identity2 "DL_Comptabilite_Full" -Rights "FullControl") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNTFSBothFormats -Session $global:DCSession -Path "$localPathBase\Comptabilite" -Identity1 "DL_Comptabilite_R" -Identity2 "DL_Comptabilite_Read" -Rights "Read") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNTFSBothFormats -Session $global:DCSession -Path "$localPathBase\Direction" -Identity1 "DL_Direction_F" -Identity2 "DL_Direction_Full" -Rights "FullControl") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNTFSBothFormats -Session $global:DCSession -Path "$localPathBase\Informatique" -Identity1 "DL_Informatique_F" -Identity2 "DL_Informatique_Full" -Rights "FullControl") { $global:note++ }
+$global:totalPoints++; if (Test-RemoteNTFSBothFormats -Session $global:DCSession -Path "$localPathBase\Informatique" -Identity1 "DL_Informatique_R" -Identity2 "DL_Informatique_Read" -Rights "Read") { $global:note++ }
+
+
+# =========================
+# FIN PARTIE 7 : Tests Partages et NTFS
+# =========================
+
+
+# =========================
+# PARTIE 8 : Tests GPO
+# =========================
+
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  PARTIE 8 : Vérification des stratégies de groupe" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# =========================
+# Fonction : Test existence GPO
+# =========================
+function Test-RemoteGPOExists {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$GPOName
+    )
+    
+    $scriptBlock = {
+        param($name)
+        try {
+            $gpo = Get-GPO -Name $name -ErrorAction SilentlyContinue
+            if ($gpo) {
+                return @{ Exists = $true; DisplayName = $gpo.DisplayName; Id = $gpo.Id }
+            }
+            return @{ Exists = $false }
+        } catch {
+            return @{ Exists = $false }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $GPOName
+    
+    if ($result.Exists) {
+        Write-Log "✓ GPO '$GPOName' existe" "Green"
+        return $true
+    } else {
+        Write-Log "✗ GPO '$GPOName' introuvable" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test politique de blocage Panneau de configuration
+# =========================
+function Test-RemoteGPOControlPanelBlock {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$GPOName
+    )
+    
+    $scriptBlock = {
+        param($name)
+        try {
+            $gpo = Get-GPO -Name $name -ErrorAction Stop
+            $report = Get-GPOReport -Guid $gpo.Id -ReportType Xml
+            [xml]$xml = $report
+            
+            # Recherche de la politique en français ou anglais
+            $policy = $xml.GPO.User.ExtensionData.Extension.Policy | Where-Object { 
+                $_.Name -like "*Panneau*" -or 
+                $_.Name -like "*Control*Panel*" -or 
+                $_.Name -like "*Paramètres*"
+            }
+            
+            if ($policy -and $policy.State -eq "Enabled") {
+                return @{ 
+                    Found = $true
+                    Enabled = $true
+                    PolicyName = $policy.Name
+                }
+            } elseif ($policy) {
+                return @{ 
+                    Found = $true
+                    Enabled = $false
+                    PolicyName = $policy.Name
+                }
+            } else {
+                return @{ Found = $false }
+            }
+        } catch {
+            return @{ Found = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $GPOName
+    
+    if ($result.Found -and $result.Enabled) {
+        Write-Log "✓ GPO '$GPOName' : Blocage Panneau de configuration activé" "Green"
+        return $true
+    } elseif ($result.Found -and -not $result.Enabled) {
+        Write-Log "✗ GPO '$GPOName' : Politique trouvée mais non activée" "Red"
+        return $false
+    } else {
+        Write-Log "✗ GPO '$GPOName' : Politique de blocage non configurée" "Red"
+        return $false
+    }
+}
+
+# =========================
+# Fonction : Test mappages de lecteurs réseau
+# =========================
+function Test-RemoteGPODriveMappings {
+    param(
+        [System.Management.Automation.Runspaces.PSSession]$Session,
+        [string]$GPOName,
+        [hashtable[]]$ExpectedMappings
+    )
+    
+    $scriptBlock = {
+        param($name, $expected)
+        try {
+            $gpo = Get-GPO -Name $name -ErrorAction Stop
+            $report = Get-GPOReport -Guid $gpo.Id -ReportType Xml
+            [xml]$xml = $report
+            
+            $drives = $xml.GPO.User.ExtensionData.Extension.DriveMapSettings.Drive
+            
+            if (-not $drives) {
+                return @{ Found = $false; Mappings = @() }
+            }
+            
+            $mappings = @()
+            foreach ($expected in $expected) {
+                $shareName = $expected.Share
+                $ouName = $expected.OU
+                
+                # Recherche du lecteur correspondant
+                $drive = $drives | Where-Object {
+                    $_.Properties.path -like "*\$shareName*"
+                }
+                
+                if ($drive) {
+                    $ouFilter = $drive.Filters.FilterOrgUnit.name
+                    $ouMatch = $ouFilter -like "*OU=$ouName,OU=Utilisateurs*"
+                    
+                    $mappings += @{
+                        Service = $shareName
+                        Found = $true
+                        Letter = $drive.Properties.letter
+                        Path = $drive.Properties.path
+                        OUFilter = $ouFilter
+                        OUMatch = $ouMatch
+                    }
+                } else {
+                    $mappings += @{
+                        Service = $shareName
+                        Found = $false
+                    }
+                }
+            }
+            
+            return @{ Found = $true; Mappings = $mappings }
+            
+        } catch {
+            return @{ Found = $false; Error = $_.Exception.Message }
+        }
+    }
+    
+    $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $GPOName, $ExpectedMappings
+    
+    if (-not $result.Found) {
+        Write-Log "✗ GPO '$GPOName' : Aucun mappage de lecteur configuré" "Red"
+        return $false
+    }
+    
+    $allOk = $true
+    foreach ($mapping in $result.Mappings) {
+        $service = $mapping.Service
+        
+        if (-not $mapping.Found) {
+            Write-Log "✗ GPO '$GPOName' : Mappage manquant pour '$service'" "Red"
+            $allOk = $false
+        } elseif (-not $mapping.OUMatch) {
+            Write-Log "✗ GPO '$GPOName' : Filtre OU incorrect pour '$service'" "Red"
+            $allOk = $false
+        } else {
+            Write-Log "✓ GPO '$GPOName' : Mappage '$service' → $($mapping.Letter) correctement configuré" "Green"
+        }
+    }
+    
+    return $allOk
+}
+
+# =========================
+# Lancement des tests - GPO Existence
+# =========================
+Write-Log "`n──── Existence des GPO ────" "Yellow"
+
+$global:totalPoints++
+if (Test-RemoteGPOExists -Session $global:DCSession -GPOName "GPO_Blocage_Panneau_Config") { 
+    $global:note++ 
+}
+
+$global:totalPoints++
+if (Test-RemoteGPOExists -Session $global:DCSession -GPOName "GPO_Lecteurs_Reseau") { 
+    $global:note++ 
+}
+
+# =========================
+# Lancement des tests - Politique de blocage Panneau de configuration
+# =========================
+Write-Log "`n──── Configuration GPO Blocage Panneau ────" "Yellow"
+
+$global:totalPoints++
+if (Test-RemoteGPOControlPanelBlock -Session $global:DCSession -GPOName "GPO_Blocage_Panneau_Config") { 
+    $global:note++ 
+}
+
+# =========================
+# Lancement des tests - Mappages de lecteurs réseau
+# =========================
+Write-Log "`n──── Configuration GPO Lecteurs Réseau ────" "Yellow"
+
+$expectedDriveMappings = @(
+    @{ Share = "Comptabilite"; OU = "Comptabilite" },
+    @{ Share = "Informatique"; OU = "Informatique" },
+    @{ Share = "Direction"; OU = "Direction" }
+)
+
+$global:totalPoints++
+if (Test-RemoteGPODriveMappings -Session $global:DCSession -GPOName "GPO_Lecteurs_Reseau" -ExpectedMappings $expectedDriveMappings) { 
+    $global:note++ 
+}
+
+# =========================
+# Fin PARTIE 8 : Tests GPO
+# =========================
+
+
+# =========================
+# PARTIE 9 : Tests DFS (Distributed File System)
+# =========================
+
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  PARTIE 9 : Vérification DFS (Distributed File System)" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+
+# Si aucune session n'est établie, passer les tests
+if (-not $global:SessionDFS01 -and -not $global:SessionDFS02) {
+    Write-Log "✗ Aucune session DFS disponible - Tests DFS ignorés" "Red"
+} else {
+    # =========================
+    # Fonction : Test installation rôle DFS
+    # =========================
+    function Test-RemoteDFSRole {
+        param(
+            [System.Management.Automation.Runspaces.PSSession]$Session,
+            [string]$ServerName
+        )
+        
+        if (-not $Session) {
+            Write-Log "✗ [$ServerName] Session non disponible" "Red"
+            return $false
+        }
+        
+        $scriptBlock = {
+            try {
+                $dfsNamespace = Get-WindowsFeature -Name "FS-DFS-Namespace" -ErrorAction Stop
+                $dfsReplication = Get-WindowsFeature -Name "FS-DFS-Replication" -ErrorAction Stop
+                
+                return @{
+                    NamespaceInstalled = $dfsNamespace.Installed
+                    ReplicationInstalled = $dfsReplication.Installed
+                }
+            } catch {
+                return @{ NamespaceInstalled = $false; ReplicationInstalled = $false }
+            }
+        }
+        
+        $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock
+        
+        if ($result.NamespaceInstalled -and $result.ReplicationInstalled) {
+            Write-Log "✓ [$ServerName] Rôles DFS installés (Namespace + Replication)" "Green"
+            return $true
+        } elseif ($result.NamespaceInstalled) {
+            Write-Log "⚠ [$ServerName] Seul DFS Namespace est installé" "Yellow"
+            return $false
+        } else {
+            Write-Log "✗ [$ServerName] Rôles DFS non installés" "Red"
+            return $false
+        }
+    }
+
+    # =========================
+    # Fonction : Test existence namespace DFS (version améliorée)
+    # =========================
+    function Test-RemoteDFSNamespace {
+        param(
+            [System.Management.Automation.Runspaces.PSSession]$Session,
+            [string]$NamespacePath,
+            [string]$ServerName
+        )
+        
+        if (-not $Session) {
+            Write-Log "✗ [$ServerName] Session non disponible" "Red"
+            return $false
+        }
+        
+        $scriptBlock = {
+            param($path)
+            try {
+                # Import du module DFSN
+                Import-Module DFSN -ErrorAction Stop
+                
+                # Méthode 1 : Get-DfsnRoot direct
+                $namespace = Get-DfsnRoot -Path $path -ErrorAction SilentlyContinue
+                
+                if ($namespace) {
+                    return @{
+                        Exists = $true
+                        Method = "Get-DfsnRoot"
+                        Path = $namespace.Path
+                        Type = $namespace.Type
+                        State = $namespace.State
+                    }
+                }
+                
+                # Méthode 2 : Lister tous les namespaces du domaine
+                $allRoots = Get-DfsnRoot -ErrorAction SilentlyContinue
+                $found = $allRoots | Where-Object { $_.Path -like "*$path*" -or $path -like "*$($_.Path)*" }
+                
+                if ($found) {
+                    return @{
+                        Exists = $true
+                        Method = "Get-DfsnRoot (all)"
+                        Path = $found.Path
+                        Type = $found.Type
+                        State = $found.State
+                    }
+                }
+                
+                # Méthode 3 : Test via Test-Path
+                if (Test-Path $path -ErrorAction SilentlyContinue) {
+                    return @{
+                        Exists = $true
+                        Method = "Test-Path"
+                        Path = $path
+                    }
+                }
+                
+                return @{ Exists = $false }
+                
+            } catch {
+                return @{ Exists = $false; Error = $_.Exception.Message }
+            }
+        }
+        
+        $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $NamespacePath
+        
+        if ($result.Exists) {
+            Write-Log "✓ Namespace DFS '$($result.Path)' existe (Type: $($result.Type), Méthode: $($result.Method))" "Green"
+            return $true
+        } else {
+            Write-Log "✗ Namespace DFS '$NamespacePath' introuvable" "Red"
+            if ($result.Error) {
+                Write-Host "  Erreur: $($result.Error)" -ForegroundColor Yellow
+            }
+            return $false
+        }
+    }
+
+    # =========================
+    # Fonction : Test dossier DFS avec cibles (version améliorée)
+    # =========================
+    function Test-RemoteDFSFolder {
+        param(
+            [System.Management.Automation.Runspaces.PSSession]$Session,
+            [string]$FolderPath,
+            [string[]]$ExpectedTargets,
+            [string]$ServerName
+        )
+        
+        if (-not $Session) {
+            Write-Log "✗ [$ServerName] Session non disponible" "Red"
+            return $false
+        }
+        
+        $scriptBlock = {
+            param($path, $expected)
+            try {
+                Import-Module DFSN -ErrorAction Stop
+                
+                # Méthode 1 : Get-DfsnFolder direct
+                $folder = Get-DfsnFolder -Path $path -ErrorAction SilentlyContinue
+                
+                if (-not $folder) {
+                    # Méthode 2 : Test-Path pour vérifier l'existence
+                    if (Test-Path $path -ErrorAction SilentlyContinue) {
+                        return @{ 
+                            Exists = $true
+                            Method = "Test-Path"
+                            Targets = @()
+                            FoundExpected = @()
+                            ExpectedCount = $expected.Count
+                            FoundCount = 0
+                            Warning = "Dossier accessible mais cmdlets DFS non disponibles"
+                        }
+                    }
+                    return @{ Exists = $false }
+                }
+                
+                $targets = Get-DfsnFolderTarget -Path $path -ErrorAction SilentlyContinue
+                $targetPaths = $targets | ForEach-Object { $_.TargetPath }
+                
+                $foundTargets = @()
+                foreach ($exp in $expected) {
+                    # Recherche flexible : on cherche le nom du serveur dans les cibles
+                    $serverShortName = ($exp -split '\.')[0]
+                    $matchingTarget = $targetPaths | Where-Object { $_ -like "*$serverShortName*" -or $_ -like "*$exp*" }
+                    if ($matchingTarget) {
+                        $foundTargets += $exp
+                    }
+                }
+                
+                return @{
+                    Exists = $true
+                    Method = "Get-DfsnFolder"
+                    Targets = $targetPaths
+                    FoundExpected = $foundTargets
+                    ExpectedCount = $expected.Count
+                    FoundCount = $foundTargets.Count
+                }
+            } catch {
+                return @{ Exists = $false; Error = $_.Exception.Message }
+            }
+        }
+        
+        $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $FolderPath, $ExpectedTargets
+        
+        if (-not $result.Exists) {
+            Write-Log "✗ Dossier DFS '$FolderPath' introuvable" "Red"
+            return $false
+        }
+        
+        if ($result.Warning) {
+            Write-Log "⚠ Dossier DFS '$FolderPath' existe (méthode: $($result.Method))" "Yellow"
+            return $true
+        }
+        
+        if ($result.FoundCount -ge 1) {
+            Write-Log "✓ Dossier DFS '$FolderPath' configuré avec $($result.FoundCount) cible(s)" "Green"
+            return $true
+        } else {
+            Write-Log "⚠ Dossier DFS '$FolderPath' : $($result.FoundCount)/$($result.ExpectedCount) cibles trouvées" "Yellow"
+            return $false
+        }
+    }
+
+    # =========================
+    # Fonction : Test structure physique DFS
+    # =========================
+    function Test-RemoteDFSPhysicalStructure {
+        param(
+            [System.Management.Automation.Runspaces.PSSession]$Session,
+            [string]$BasePath,
+            [string[]]$ExpectedFolders,
+            [string]$ServerName
+        )
+        
+        if (-not $Session) {
+            Write-Log "✗ [$ServerName] Session non disponible" "Red"
+            return $false
+        }
+        
+        $scriptBlock = {
+            param($base, $folders)
+            try {
+                if (-not (Test-Path $base)) {
+                    return @{ BaseExists = $false }
+                }
+                
+                $foundFolders = @()
+                foreach ($folder in $folders) {
+                    $path = Join-Path $base $folder
+                    if (Test-Path $path) {
+                        $foundFolders += $folder
+                    }
+                }
+                
+                return @{
+                    BaseExists = $true
+                    FoundFolders = $foundFolders
+                    ExpectedCount = $folders.Count
+                    FoundCount = $foundFolders.Count
+                }
+            } catch {
+                return @{ BaseExists = $false; Error = $_.Exception.Message }
+            }
+        }
+        
+        $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $BasePath, $ExpectedFolders
+        
+        if (-not $result.BaseExists) {
+            Write-Log "✗ [$ServerName] Dossier racine '$BasePath' introuvable" "Red"
+            return $false
+        }
+        
+        if ($result.FoundCount -eq $result.ExpectedCount) {
+            Write-Log "✓ [$ServerName] Structure physique DFS complète ($($result.FoundCount) dossiers)" "Green"
+            return $true
+        } else {
+            Write-Log "⚠ [$ServerName] Structure physique DFS incomplète ($($result.FoundCount)/$($result.ExpectedCount))" "Yellow"
+            return $false
+        }
+    }
+
+    # =========================
+    # Fonction : Test permissions NTFS sur dossier DFS (version simplifiée FR)
+    # =========================
+    function Test-RemoteDFSNTFSPermissions {
+        param(
+            [System.Management.Automation.Runspaces.PSSession]$Session,
+            [string]$FolderPath,
+            [string]$FolderName,
+            [hashtable[]]$ExpectedPermissions,
+            [string]$ServerName
+        )
+        
+        if (-not $Session) {
+            Write-Log "✗ [$ServerName] Session non disponible" "Red"
+            return $false
+        }
+        
+        $scriptBlock = {
+            param($path, $expected)
+            try {
+                if (-not (Test-Path $path)) {
+                    return @{ Exists = $false }
+                }
+                
+                $acl = Get-Acl -Path $path
+                $results = @()
+                
+                foreach ($exp in $expected) {
+                    $groupName = $exp.Group
+                    $expectedRight = $exp.Right
+                    
+                    # Recherche flexible : accepte le nom exact OU les variantes DL
+                    # Ex: G_Informatique OU DL_Informatique_F OU DL-Informatique-Full
+                    $groupPatterns = @(
+                        $groupName,
+                        # Variantes Domain Local avec préfixe DL_
+                        ($groupName -replace '^G_', 'DL_') + '_F',
+                        ($groupName -replace '^G_', 'DL_') + '_Full',
+                        ($groupName -replace '^G_', 'dl_') + '_full',
+                        ($groupName -replace '^G_', 'DL_') + '_R',
+                        ($groupName -replace '^G_', 'DL_') + '_Read',
+                        ($groupName -replace '^G_', 'dl_') + '_Read',
+                        ($groupName -replace '^G_', 'DL_') + '_M',
+                        ($groupName -replace '^G_', 'DL_') + '_Modify',
+                        ($groupName -replace '^G_', 'DL_') + '_Mod',
+                        ($groupName -replace '^G_', 'dl_') + '_M',
+                        ($groupName -replace '^G_', 'DL_') + '_W',
+                        ($groupName -replace '^G_', 'dl_') + '_W',
+                        # Variantes Domain Local avec préfixe DL-
+                        ($groupName -replace '^G_', 'DL-') + '-F',
+                        ($groupName -replace '^G_', 'DL-') + '-Full',
+                        ($groupName -replace '^G_', 'DL-') + '-R',
+                        ($groupName -replace '^G_', 'DL-') + '-Read',
+                        ($groupName -replace '^G_', 'DL-') + '-M',
+                        ($groupName -replace '^G_', 'DL-') + '-Modify',
+                        ($groupName -replace '^G_', 'DL-') + '-Mod',
+                        ($groupName -replace '^G_', 'DL-') + '-W'
+                    )
+                    
+                    # Variante sans 's' final (ex: Projet au lieu de Projets)
+                    if ($groupName -like "G_*s") {
+                        $baseNameSingular = ($groupName -replace '^G_', '').TrimEnd('s')
+                        $groupPatterns += @(
+                            "DL_$baseNameSingular" + '_F',
+                            "DL_$baseNameSingular" + '_Full',
+                            "DL_$baseNameSingular" + '_R',
+                            "DL_$baseNameSingular" + '_Read',
+                            "DL_$baseNameSingular" + '_M',
+                            "DL_$baseNameSingular" + '_Modify',
+                            "DL_$baseNameSingular" + '_Mod',
+                            "dl_$baseNameSingular" + '_M',
+                            "DL_$baseNameSingular" + '_W',
+                            "dl_$baseNameSingular" + '_W'
+                        )
+                    }
+                    
+                    $ace = $null
+                    $foundRight = $null
+                    
+                    foreach ($pattern in $groupPatterns) {
+                        $ace = $acl.Access | Where-Object {
+                            $_.IdentityReference -like "*$pattern*" -and
+                            $_.FileSystemRights -match $expectedRight
+                        }
+                        if ($ace) {
+                            $foundRight = $ace.FileSystemRights
+                            break
+                        }
+                    }
+                    
+                    $results += @{
+                        Group = $groupName
+                        Found = ($ace -ne $null)
+                        ExpectedRight = $expectedRight
+                        FoundRight = $foundRight
+                        FoundIdentity = if ($ace) { $ace.IdentityReference } else { $null }
+                    }
+                }
+                
+                return @{
+                    Exists = $true
+                    Results = $results
+                }
+            } catch {
+                return @{ Exists = $false; Error = $_.Exception.Message }
+            }
+        }
+        
+        $result = Invoke-Command -Session $Session -ScriptBlock $scriptBlock -ArgumentList $FolderPath, $ExpectedPermissions
+        
+        if (-not $result.Exists) {
+            Write-Log "✗ [$ServerName] Dossier '$FolderPath' introuvable" "Red"
+            return $false
+        }
+        
+        $allOk = $true
+        foreach ($perm in $result.Results) {
+            if ($perm.Found) {
+                Write-Log "✓ [$ServerName][$FolderName] Permission '$($perm.Group)' → $($perm.ExpectedRight) OK (via $($perm.FoundIdentity))" "Green"
+            } else {
+                Write-Log "✗ [$ServerName][$FolderName] Permission '$($perm.Group)' → $($perm.ExpectedRight) manquante" "Red"
+                $allOk = $false
+            }
+        }
+        
+        return $allOk
+    }
+
+    # =========================
+    # Lancement des tests - Installation rôles DFS
+    # =========================
+    Write-Log "`n──── Installation des rôles DFS ────" "Yellow"
+
+    if ($global:SessionDFS01) {
+        $global:totalPoints++
+        if (Test-RemoteDFSRole -Session $global:SessionDFS01 -ServerName "DFS01") {
+            $global:note++
+        }
+    }
+
+    if ($global:SessionDFS02) {
+        $global:totalPoints++
+        if (Test-RemoteDFSRole -Session $global:SessionDFS02 -ServerName "DFS02") {
+            $global:note++
+        }
+    }
+
+    # =========================
+    # Lancement des tests - Namespace DFS
+    # =========================
+    Write-Log "`n──── Namespace DFS ────" "Yellow"
+
+    $namespacePath = "\\$DomainDns\ENT"
+    Write-Host "Test du namespace : $namespacePath" -ForegroundColor Gray
+
+    if ($global:SessionDFS01) {
+        $global:totalPoints++
+        if (Test-RemoteDFSNamespace -Session $global:SessionDFS01 -NamespacePath $namespacePath -ServerName "DFS01") {
+            $global:note++
+        }
+    }
+
+    # =========================
+    # Lancement des tests - Structure physique
+    # =========================
+    Write-Log "`n──── Structure physique des dossiers DFS ────" "Yellow"
+
+    $dfsBasePath = "$DataDriveDFS\DFSData"
+    $expectedFolders = @("Projets", "Transfert", "Docs-Services")
+
+    if ($global:SessionDFS01) {
+        $global:totalPoints++
+        if (Test-RemoteDFSPhysicalStructure -Session $global:SessionDFS01 -BasePath $dfsBasePath -ExpectedFolders $expectedFolders -ServerName "DFS01") {
+            $global:note++
+        }
+    }
+
+    if ($global:SessionDFS02) {
+        $global:totalPoints++
+        if (Test-RemoteDFSPhysicalStructure -Session $global:SessionDFS02 -BasePath $dfsBasePath -ExpectedFolders $expectedFolders -ServerName "DFS02") {
+            $global:note++
+        }
+    }
+
+    # =========================
+    # Lancement des tests - Dossiers DFS avec cibles
+    # =========================
+    Write-Log "`n──── Configuration des dossiers DFS (cibles) ────" "Yellow"
+
+    if ($global:SessionDFS01) {
+        # Test Projets (2 cibles attendues)
+        $global:totalPoints++
+        if (Test-RemoteDFSFolder -Session $global:SessionDFS01 -FolderPath "$namespacePath\Projets" -ExpectedTargets @("$NomServeurDFS01", "$NomServeurDFS02") -ServerName "DFS01") {
+            $global:note++
+        }
+
+        # Test Transfert (1 cible)
+        $global:totalPoints++
+        if (Test-RemoteDFSFolder -Session $global:SessionDFS01 -FolderPath "$namespacePath\Transfert" -ExpectedTargets @("$NomServeurDFS01") -ServerName "DFS01") {
+            $global:note++
+        }
+
+        # Test Docs-Services (1 cible)
+        $global:totalPoints++
+        if (Test-RemoteDFSFolder -Session $global:SessionDFS01 -FolderPath "$namespacePath\Docs-Services" -ExpectedTargets @("$NomServeurDFS01") -ServerName "DFS01") {
+            $global:note++
+        }
+    }
+
+    # =========================
+    # Lancement des tests - Permissions NTFS
+    # =========================
+    Write-Log "`n──── Permissions NTFS sur dossiers DFS ────" "Yellow"
+
+    if ($global:SessionDFS01) {
+        # Permissions Projets
+        $projetsPerms = @(
+            @{ Group = "G_Informatique"; Right = "FullControl" },
+            @{ Group = "G_Comptabilite"; Right = "Modify" },
+            @{ Group = "G_Direction"; Right = "Modify" }
+        )
+        
+        $global:totalPoints++
+        if (Test-RemoteDFSNTFSPermissions -Session $global:SessionDFS01 -FolderPath "$dfsBasePath\Projets" -FolderName "Projets" -ExpectedPermissions $projetsPerms -ServerName "DFS01") {
+            $global:note++
+        }
+
+        # Permissions Transfert
+        $transfertPerms = @(
+            @{ Group = "G_Informatique"; Right = "FullControl" },
+            @{ Group = "G_Transfert"; Right = "Write" }
+        )
+        
+        $global:totalPoints++
+        if (Test-RemoteDFSNTFSPermissions -Session $global:SessionDFS01 -FolderPath "$dfsBasePath\Transfert" -FolderName "Transfert" -ExpectedPermissions $transfertPerms -ServerName "DFS01") {
+            $global:note++
+        }
+
+        # Permissions Docs-Services
+        $docsPerms = @(
+            @{ Group = "G_Direction"; Right = "FullControl" },
+            @{ Group = "G_Comptabilite"; Right = "Modify" }
+        )
+        
+        $global:totalPoints++
+        if (Test-RemoteDFSNTFSPermissions -Session $global:SessionDFS01 -FolderPath "$dfsBasePath\Docs-Services" -FolderName "Docs-Services" -ExpectedPermissions $docsPerms -ServerName "DFS01") {
+            $global:note++
+        }
+    }
+
+    # =========================
+    # Fermeture des sessions DFS
+    # =========================
+    if ($global:SessionDFS01) {
+        Remove-PSSession -Session $global:SessionDFS01 -ErrorAction SilentlyContinue
+        Write-Host "✓ Session DFS01 fermée" -ForegroundColor DarkGray
+    }
+    
+    if ($global:SessionDFS02) {
+        Remove-PSSession -Session $global:SessionDFS02 -ErrorAction SilentlyContinue
+        Write-Host "✓ Session DFS02 fermée" -ForegroundColor DarkGray
+    }
+}
+
+# =========================
+# Fin PARTIE 9 : Tests DFS
+# =========================
+
+
+
+# =========================
+# PARTIE Final : Calcul de la note et envoi JSON
+# =========================
+
+function Show-And-Send-Result {
+    param(
+        [string]$Nom,
+        [string]$Prenom,
+        [double]$Note,
+        [int]$Total,
+        [array]$Logs,
+        [string]$DomainDns
+    )
+    
+    $scoreSur20 = if ($Total -gt 0) { [math]::Round(($Note / $Total) * 20, 2) } else { 0 }
+    $pourcentage = if ($Total -gt 0) { [math]::Round(100 * $Note / $Total, 1) } else { 0 }
+    
+    $jsonFile = "C:\Devoir01_AD_GPO_DFS-$Nom-$Prenom.json"
+    $payload = [ordered]@{
+        status       = "OK"
+        timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        nom          = $Nom
+        prenom       = $Prenom
+        exercice     = "TP Stratégies de groupe (GPO)"
+        domaine      = $DomainDns
+        score        = $Note
+        total        = $Total
+        note         = $scoreSur20
+        commentaires = ($Logs -join "`n")
+    } | ConvertTo-Json -Depth 4
+    
+    $payload | Set-Content -Path $jsonFile -Encoding UTF8
+    Write-Host ""
+    Write-Host "✅ Fichier JSON généré : $jsonFile" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "           RÉSULTAT FINAL" -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ("Exercice   : TP Stratégies de groupe (GPO)") -ForegroundColor White
+    Write-Host ("Étudiant   : $Prenom $Nom") -ForegroundColor White
+    Write-Host ("Domaine    : $DomainDns") -ForegroundColor White
+    Write-Host ("Points     : {0} / {1}" -f $Note, $Total) -ForegroundColor Cyan
+    Write-Host ("Note       : {0} / 20" -f $scoreSur20) -ForegroundColor Cyan
+    Write-Host ("Pourcentage: {0}%" -f $pourcentage) -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    
+    # Envoi optionnel
+    $serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=Devoir01_AD_GPO_DFS-$Nom-$Prenom.json"
+    
+    try {
+        Invoke-RestMethod -Uri $serverUrl -Method Post -Body $payload -ContentType "application/json; charset=utf-8"
+        Write-Host "✅ Fichier JSON envoyé avec succès au serveur !" -ForegroundColor Green
+    } catch {
+        Write-Host "❌ Erreur lors de l'envoi du JSON : $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+# Appel de la fonction avec les variables globales
+Show-And-Send-Result -Nom $Nom -Prenom $Prenom -Note $global:note -Total $global:totalPoints -Logs $global:logMessages -DomainDns $DomainDns
+
+# Fermeture de la session PSRemoting
+if ($global:DCSession) {
+    Remove-PSSession -Session $global:DCSession -ErrorAction SilentlyContinue
+    Write-Host ""
+    Write-Host "✓ Session PSRemoting fermée" -ForegroundColor DarkGray
+}
+
+Write-Host "`nAppuyez sur Entrée pour quitter..." -ForegroundColor Gray
+Read-Host
