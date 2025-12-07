@@ -1,0 +1,461 @@
+# =========================
+# Script de correction - TP RAID Windows Server
+# Vérification des Espaces de stockage (Storage Spaces)
+# =========================
+
+# =========================
+# En-tête / Inputs
+# =========================
+cls
+
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "      Script de vérification TP RAID Windows Server" -ForegroundColor Cyan
+Write-Host "           Espaces de stockage (Storage Spaces)" -ForegroundColor Cyan
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Ce script vérifie la configuration suivante :" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  ┌─────────────────────────────────────────────────────────┐" -ForegroundColor Gray
+Write-Host "  │  POOLS DE STOCKAGE                                      │" -ForegroundColor Gray
+Write-Host "  │    • Pool-Simple  : 2 disques de 12 Go                  │" -ForegroundColor White
+Write-Host "  │    • Pool-Miroir  : 2 disques de 35 Go                  │" -ForegroundColor White
+Write-Host "  │    • Pool-Parite  : 3 disques de 18 Go                  │" -ForegroundColor White
+Write-Host "  ├─────────────────────────────────────────────────────────┤" -ForegroundColor Gray
+Write-Host "  │  ESPACES DE STOCKAGE                                    │" -ForegroundColor Gray
+Write-Host "  │    • Espace-Simple : Type Simple (RAID 0)               │" -ForegroundColor White
+Write-Host "  │    • Espace-Miroir : Type Mirror (RAID 1)               │" -ForegroundColor White
+Write-Host "  │    • Espace-Parite : Type Parity (RAID 5)               │" -ForegroundColor White
+Write-Host "  ├─────────────────────────────────────────────────────────┤" -ForegroundColor Gray
+Write-Host "  │  VOLUMES                                                │" -ForegroundColor Gray
+Write-Host "  │    • E: (Simple)  - Fichier test-simple.txt             │" -ForegroundColor White
+Write-Host "  │    • F: (Miroir)  - Fichier test-miroir.txt             │" -ForegroundColor White
+Write-Host "  │    • G: (Parité)  - Fichier test-parite.txt             │" -ForegroundColor White
+Write-Host "  └─────────────────────────────────────────────────────────┘" -ForegroundColor Gray
+Write-Host ""
+
+# Saisie des informations étudiant
+Write-Host "─────────────────────────────────────────────────────────────" -ForegroundColor Gray
+$Nom    = Read-Host "  Entrez votre NOM"
+$Prenom = Read-Host "  Entrez votre Prénom"
+Write-Host "─────────────────────────────────────────────────────────────" -ForegroundColor Gray
+
+# Récapitulatif et confirmation
+Write-Host ""
+Write-Host "  Étudiant : $Prenom $Nom" -ForegroundColor Cyan
+Write-Host ""
+
+$confirmation = Read-Host "  Lancer la vérification ? (O/N)"
+if ($confirmation.ToUpper() -ne "O") {
+    Write-Host ""
+    Write-Host "  Script annulé." -ForegroundColor Yellow
+    exit
+}
+
+Write-Host ""
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  Démarrage de la vérification..." -ForegroundColor Green
+Write-Host "═══════════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
+# =========================
+# Configuration attendue du TP
+# =========================
+$PoolSimple = "Pool-Simple"
+$PoolMiroir = "Pool-Miroir"
+$PoolParite = "Pool-Parite"
+
+$EspaceSimple = "Espace-Simple"
+$EspaceMiroir = "Espace-Miroir"
+$EspaceParite = "Espace-Parite"
+
+$VolumeSimple = "E:"
+$VolumeMiroir = "F:"
+$VolumeParite = "G:"
+
+# =========================
+# Logs / Score
+# =========================
+$logMessages = @()
+$note = 0
+$totalPoints = 0
+
+function Write-Log([string]$Message, [string]$Color = "Gray") {
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $line = "$ts - $Message"
+    $global:logMessages += $line
+    Write-Host $line -ForegroundColor $Color
+}
+
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+Write-Log "Correction TP RAID Windows - Espaces de stockage" "Cyan"
+Write-Log "Étudiant: $Prenom $Nom" "Cyan"
+Write-Log "═══════════════════════════════════════════════════" "Cyan"
+
+# =========================
+# Fonctions de test
+# =========================
+
+function Test-StoragePoolExists {
+    param([string]$PoolName, [int]$ExpectedDisks)
+    
+    $pool = Get-StoragePool -FriendlyName $PoolName -ErrorAction SilentlyContinue
+    
+    if (-not $pool) {
+        Write-Log "[ERREUR] Pool '$PoolName' inexistant" "Red"
+        return $false
+    }
+    
+    # Vérifier le nombre de disques physiques
+    $disks = $pool | Get-PhysicalDisk -ErrorAction SilentlyContinue
+    $diskCount = ($disks | Measure-Object).Count
+    
+    if ($diskCount -lt $ExpectedDisks) {
+        Write-Log "[WARNING] Pool '$PoolName' existe mais contient $diskCount disque(s) au lieu de $ExpectedDisks" "Yellow"
+        return $true  # Le pool existe quand même
+    }
+    
+    $totalSize = [math]::Round(($pool.Size / 1GB), 1)
+    Write-Log "[OK] Pool '$PoolName' existe ($diskCount disques, ~$totalSize Go)" "Green"
+    return $true
+}
+
+function Test-VirtualDiskExists {
+    param(
+        [string]$VDiskName,
+        [string]$ExpectedResiliency  # Simple, Mirror, Parity
+    )
+    
+    $vdisk = Get-VirtualDisk -FriendlyName $VDiskName -ErrorAction SilentlyContinue
+    
+    if (-not $vdisk) {
+        Write-Log "[ERREUR] Espace de stockage '$VDiskName' inexistant" "Red"
+        return $false
+    }
+    
+    # Vérifier le type de résilience
+    $resiliency = $vdisk.ResiliencySettingName
+    
+    if ($resiliency -ne $ExpectedResiliency) {
+        Write-Log "[ERREUR] Espace '$VDiskName' a le type '$resiliency' au lieu de '$ExpectedResiliency'" "Red"
+        return $false
+    }
+    
+    $size = [math]::Round(($vdisk.Size / 1GB), 1)
+    Write-Log "[OK] Espace '$VDiskName' existe (Type: $resiliency, Taille: ~$size Go)" "Green"
+    return $true
+}
+
+function Test-VirtualDiskHealth {
+    param([string]$VDiskName)
+    
+    $vdisk = Get-VirtualDisk -FriendlyName $VDiskName -ErrorAction SilentlyContinue
+    
+    if (-not $vdisk) {
+        Write-Log "[ERREUR] Impossible de vérifier l'état de '$VDiskName' (inexistant)" "Red"
+        return $false
+    }
+    
+    $health = $vdisk.HealthStatus
+    $operational = $vdisk.OperationalStatus
+    
+    if ($health -eq "Healthy" -and $operational -eq "OK") {
+        Write-Log "[OK] Espace '$VDiskName' en bonne santé (Health: $health, Status: $operational)" "Green"
+        return $true
+    } elseif ($health -eq "Warning" -or $operational -match "Degraded") {
+        Write-Log "[WARNING] Espace '$VDiskName' en mode dégradé (Health: $health, Status: $operational)" "Yellow"
+        return $true  # Accepté car peut être le résultat du test de panne
+    } else {
+        Write-Log "[ERREUR] Espace '$VDiskName' en erreur (Health: $health, Status: $operational)" "Red"
+        return $false
+    }
+}
+
+function Test-VolumeExists {
+    param(
+        [string]$DriveLetter,
+        [string]$ExpectedLabel
+    )
+    
+    # Normaliser la lettre (enlever le ":" si présent)
+    $letter = $DriveLetter.TrimEnd(':')
+    
+    $volume = Get-Volume -DriveLetter $letter -ErrorAction SilentlyContinue
+    
+    if (-not $volume) {
+        Write-Log "[ERREUR] Volume '$DriveLetter' inexistant" "Red"
+        return $false
+    }
+    
+    $label = $volume.FileSystemLabel
+    $size = [math]::Round(($volume.Size / 1GB), 1)
+    $fs = $volume.FileSystem
+    
+    # Vérifier le label (tolérant)
+    if ($label -and $label -ne $ExpectedLabel) {
+        Write-Log "[WARNING] Volume '$DriveLetter' a le label '$label' au lieu de '$ExpectedLabel'" "Yellow"
+    }
+    
+    Write-Log "[OK] Volume '$DriveLetter' existe (Label: $label, Taille: ~$size Go, FS: $fs)" "Green"
+    return $true
+}
+
+function Test-VolumeAccessible {
+    param([string]$DriveLetter)
+    
+    $path = $DriveLetter.TrimEnd(':') + ":\"
+    
+    if (-not (Test-Path $path)) {
+        Write-Log "[ERREUR] Volume '$DriveLetter' non accessible" "Red"
+        return $false
+    }
+    
+    # Tester l'écriture
+    $testFile = Join-Path $path "test_verification_raid.tmp"
+    try {
+        "Test RAID verification" | Out-File -FilePath $testFile -Force -ErrorAction Stop
+        Remove-Item -Path $testFile -Force -ErrorAction SilentlyContinue
+        Write-Log "[OK] Volume '$DriveLetter' accessible en lecture/écriture" "Green"
+        return $true
+    } catch {
+        Write-Log "[ERREUR] Volume '$DriveLetter' non accessible en écriture : $($_.Exception.Message)" "Red"
+        return $false
+    }
+}
+
+function Test-TestFileExists {
+    param(
+        [string]$DriveLetter,
+        [string]$FileName
+    )
+    
+    $path = Join-Path ($DriveLetter.TrimEnd(':') + ":\") $FileName
+    
+    if (Test-Path $path) {
+        Write-Log "[OK] Fichier de test '$FileName' présent sur $DriveLetter" "Green"
+        return $true
+    } else {
+        Write-Log "[WARNING] Fichier de test '$FileName' absent sur $DriveLetter" "Yellow"
+        return $false
+    }
+}
+
+function Test-PoolDiskCount {
+    param(
+        [string]$PoolName,
+        [int]$MinDisks
+    )
+    
+    $pool = Get-StoragePool -FriendlyName $PoolName -ErrorAction SilentlyContinue
+    
+    if (-not $pool) {
+        Write-Log "[ERREUR] Pool '$PoolName' inexistant pour vérification des disques" "Red"
+        return $false
+    }
+    
+    $disks = $pool | Get-PhysicalDisk -ErrorAction SilentlyContinue
+    $diskCount = ($disks | Measure-Object).Count
+    
+    if ($diskCount -ge $MinDisks) {
+        Write-Log "[OK] Pool '$PoolName' contient $diskCount disque(s) (minimum requis: $MinDisks)" "Green"
+        return $true
+    } else {
+        Write-Log "[ERREUR] Pool '$PoolName' contient seulement $diskCount disque(s) (minimum requis: $MinDisks)" "Red"
+        return $false
+    }
+}
+
+function Test-StorageSpacesFeature {
+    # Vérifier que le service est disponible (sur Windows Server)
+    $pools = Get-StoragePool -ErrorAction SilentlyContinue
+    
+    if ($null -eq $pools) {
+        Write-Log "[ERREUR] Les Espaces de stockage ne sont pas disponibles sur ce système" "Red"
+        return $false
+    }
+    
+    Write-Log "[OK] Les Espaces de stockage sont disponibles" "Green"
+    return $true
+}
+
+# =========================
+# Exécution des tests
+# =========================
+
+Write-Log "`n──── Prérequis ────" "Yellow"
+
+$totalPoints++
+if (Test-StorageSpacesFeature) { $note++ }
+
+# =========================
+# Tests Pool-Simple
+# =========================
+
+Write-Log "`n──── Pool Simple (RAID 0) ────" "Yellow"
+
+$totalPoints += 2
+if (Test-StoragePoolExists -PoolName $PoolSimple -ExpectedDisks 2) { $note += 2 }
+
+$totalPoints++
+if (Test-PoolDiskCount -PoolName $PoolSimple -MinDisks 2) { $note++ }
+
+$totalPoints += 2
+if (Test-VirtualDiskExists -VDiskName $EspaceSimple -ExpectedResiliency "Simple") { $note += 2 }
+
+$totalPoints++
+if (Test-VirtualDiskHealth -VDiskName $EspaceSimple) { $note++ }
+
+$totalPoints++
+if (Test-VolumeExists -DriveLetter $VolumeSimple -ExpectedLabel "Simple") { $note++ }
+
+$totalPoints++
+if (Test-VolumeAccessible -DriveLetter $VolumeSimple) { $note++ }
+
+# =========================
+# Tests Pool-Miroir
+# =========================
+
+Write-Log "`n──── Pool Miroir (RAID 1) ────" "Yellow"
+
+$totalPoints += 2
+if (Test-StoragePoolExists -PoolName $PoolMiroir -ExpectedDisks 2) { $note += 2 }
+
+$totalPoints++
+if (Test-PoolDiskCount -PoolName $PoolMiroir -MinDisks 2) { $note++ }
+
+$totalPoints += 2
+if (Test-VirtualDiskExists -VDiskName $EspaceMiroir -ExpectedResiliency "Mirror") { $note += 2 }
+
+$totalPoints++
+if (Test-VirtualDiskHealth -VDiskName $EspaceMiroir) { $note++ }
+
+$totalPoints++
+if (Test-VolumeExists -DriveLetter $VolumeMiroir -ExpectedLabel "Miroir") { $note++ }
+
+$totalPoints++
+if (Test-VolumeAccessible -DriveLetter $VolumeMiroir) { $note++ }
+
+# =========================
+# Tests Pool-Parité
+# =========================
+
+Write-Log "`n──── Pool Parité (RAID 5) ────" "Yellow"
+
+$totalPoints += 2
+if (Test-StoragePoolExists -PoolName $PoolParite -ExpectedDisks 3) { $note += 2 }
+
+$totalPoints++
+if (Test-PoolDiskCount -PoolName $PoolParite -MinDisks 3) { $note++ }
+
+$totalPoints += 2
+if (Test-VirtualDiskExists -VDiskName $EspaceParite -ExpectedResiliency "Parity") { $note += 2 }
+
+$totalPoints++
+if (Test-VirtualDiskHealth -VDiskName $EspaceParite) { $note++ }
+
+$totalPoints++
+if (Test-VolumeExists -DriveLetter $VolumeParite -ExpectedLabel "Parite") { $note++ }
+
+$totalPoints++
+if (Test-VolumeAccessible -DriveLetter $VolumeParite) { $note++ }
+
+# =========================
+# Tests fichiers de test (bonus)
+# =========================
+
+Write-Log "`n──── Fichiers de test (bonus) ────" "Yellow"
+
+$totalPoints++
+if (Test-TestFileExists -DriveLetter $VolumeSimple -FileName "test-simple.txt") { $note++ }
+
+$totalPoints++
+if (Test-TestFileExists -DriveLetter $VolumeMiroir -FileName "test-miroir.txt") { $note++ }
+
+$totalPoints++
+if (Test-TestFileExists -DriveLetter $VolumeParite -FileName "test-parite.txt") { $note++ }
+
+# =========================
+# Résumé des pools (informatif)
+# =========================
+
+Write-Log "`n──── Résumé de la configuration ────" "Yellow"
+
+$allPools = Get-StoragePool | Where-Object { $_.FriendlyName -ne "Primordial" }
+foreach ($pool in $allPools) {
+    $disks = ($pool | Get-PhysicalDisk | Measure-Object).Count
+    $size = [math]::Round(($pool.Size / 1GB), 1)
+    $free = [math]::Round(($pool.FreeSpace / 1GB), 1)
+    Write-Log "  Pool: $($pool.FriendlyName) | Disques: $disks | Taille: $size Go | Libre: $free Go" "Cyan"
+}
+
+$allVDisks = Get-VirtualDisk
+foreach ($vdisk in $allVDisks) {
+    $size = [math]::Round(($vdisk.Size / 1GB), 1)
+    Write-Log "  Espace: $($vdisk.FriendlyName) | Type: $($vdisk.ResiliencySettingName) | Taille: $size Go | État: $($vdisk.HealthStatus)" "Cyan"
+}
+
+# =========================
+# Calcul et affichage du résultat
+# =========================
+
+function Show-And-Send-Result {
+    param(
+        [string]$Nom,
+        [string]$Prenom,
+        [double]$Note,
+        [int]$Total,
+        [array]$Logs
+    )
+    
+    $scoreSur20 = if ($Total -gt 0) { [math]::Round(($Note / $Total) * 20, 2) } else { 0 }
+    $pourcentage = if ($Total -gt 0) { [math]::Round(100 * $Note / $Total, 1) } else { 0 }
+    
+    $jsonFile = "C:\RAID_TP1_Windows-$Nom-$Prenom.json"
+    $payload = [ordered]@{
+        status       = "OK"
+        timestamp    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        nom          = $Nom
+        prenom       = $Prenom
+        tp           = "TP1 - RAID Windows Server (Espaces de stockage)"
+        score        = $Note
+        total        = $Total
+        note         = $scoreSur20
+        commentaires = ($Logs -join "`n")
+    } | ConvertTo-Json -Depth 4
+    
+    $payload | Set-Content -Path $jsonFile -Encoding UTF8
+    Write-Host ""
+    Write-Host "✅ Fichier JSON généré : $jsonFile" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "           RÉSULTAT FINAL" -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ("TP         : RAID Windows Server") -ForegroundColor White
+    Write-Host ("Étudiant   : $Prenom $Nom") -ForegroundColor White
+    Write-Host ("Points     : {0} / {1}" -f $Note, $Total) -ForegroundColor Cyan
+    Write-Host ("Note       : {0} / 20" -f $scoreSur20) -ForegroundColor Cyan
+    Write-Host ("Pourcentage: {0}%" -f $pourcentage) -ForegroundColor Cyan
+    Write-Host "══════════════════════════════════════" -ForegroundColor Cyan
+    
+    # Envoi vers le serveur
+    $serverUrl = "http://www.ericm.fr/logsapi/logreceiver.php?filename=RAID_TP1_Windows-$Nom-$Prenom.json"
+    try {
+        Invoke-RestMethod -Uri $serverUrl -Method Post -Body $payload -ContentType "application/json; charset=utf-8"
+        Write-Host "✅ Fichier JSON envoyé avec succès au serveur !" -ForegroundColor Green
+    } catch {
+        Write-Host "❌ Erreur lors de l'envoi du JSON : $($_.Exception.Message)" -ForegroundColor Red
+    }
+}
+
+Show-And-Send-Result -Nom $Nom -Prenom $Prenom -Note $note -Total $totalPoints -Logs $logMessages
+
+Write-Host ""
+Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "  Points de vérification :" -ForegroundColor Yellow
+Write-Host "  • 3 pools de stockage (Simple, Miroir, Parité)" -ForegroundColor White
+Write-Host "  • 3 espaces de stockage avec le bon type de résilience" -ForegroundColor White
+Write-Host "  • 3 volumes montés et accessibles (E:, F:, G:)" -ForegroundColor White
+Write-Host "  • Fichiers de test présents sur chaque volume" -ForegroundColor White
+Write-Host "══════════════════════════════════════════════════════════" -ForegroundColor Cyan
+
+Write-Host "`nAppuyez sur Entrée pour quitter..." -ForegroundColor Gray
+Read-Host
