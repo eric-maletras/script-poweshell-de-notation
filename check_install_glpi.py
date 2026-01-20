@@ -520,7 +520,7 @@ def envoyer_donnees(nom, prenom, commentaires, note):
     filename = f"GLPI-{nom}-{prenom}.json"
     
     # Construire l'URL avec le paramètre filename
-    url = f"http://www.imcalternance.com/logsapi/logreceiver.php?filename={filename}"
+    url = f"http://www.ericm.fr/logsapi/logreceiver.php?filename={filename}"
     
     headers = {"Content-Type": "application/json"}
     data = {
