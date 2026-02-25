@@ -68,6 +68,12 @@ Les scripts Python (`check_glpi_data.py`, `check_install_glpi.py`, `check_instal
 - **Logs** : format horodaté `yyyy-MM-dd HH:mm:ss - Message`
 - **Scoring** : chaque vérification ajoute à `$totalPoints` et incrémente `$note` si réussi
 
+## Dossier fichierPartages
+
+Le dossier `fichierPartages/` sert à échanger des fichiers (PDF, specs, etc.) entre l'utilisateur et Claude.
+- Ce dossier est dans le `.gitignore` et ne doit jamais être commité
+- Les fichiers doivent être supprimés après utilisation (une fois le contenu traité)
+
 ## Environnement cible
 
 - **Scripts PowerShell** : Windows Server 2019+, postes clients Windows joints au domaine
